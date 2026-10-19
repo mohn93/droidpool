@@ -8,6 +8,7 @@ import { realRunner, type Runner } from './exec.ts';
 import { abortCurrentBuild, buildBase, currentBuildPid, listBases, removeBase } from './base.ts';
 import { getDevice, listDevices, releaseDevice, renewLease, reap } from './pool.ts';
 import { doctorReport } from './doctor.ts';
+import { showDevice } from './viewer.ts';
 import type { Flavor } from './state.ts';
 
 export interface CliDeps {
@@ -25,6 +26,7 @@ const USAGE = `usage: droidpool <command> ...
   get [--clean|--signed-in] [--api N] [--project P]
   release <serial>
   renew <serial>
+  show <serial>
   ls
   gc
   doctor
@@ -108,6 +110,12 @@ async function dispatch(argv: string[], deps: CliDeps, reaped: string[]): Promis
       const r = await releaseDevice(runner, cfg, positionals[0]!);
       if (!r.released) throw new Error(r.message);
       out(r.message + '\n');
+      return;
+    }
+    case 'show': {
+      const { positionals } = parseArgs({ ...opts, args: rest });
+      if (positionals.length !== 1) throw new UsageError('show needs a serial');
+      out((await showDevice(runner, cfg, positionals[0]!, { log: (m) => err(m + '\n') })) + '\n');
       return;
     }
     case 'renew': {

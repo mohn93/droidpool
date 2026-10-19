@@ -59,6 +59,7 @@ function removeDeviceFiles(cfg: Config, id: string): void {
 
 /** Kill the emulator if alive and remove its files. The caller removes the lease afterwards. */
 async function teardown(runner: Runner, cfg: Config, l: Lease): Promise<void> {
+  if (l.viewerPid !== undefined && pidAlive(runner, l.viewerPid)) runner.kill(l.viewerPid, 'SIGTERM');
   if (pidAlive(runner, l.emulatorPid)) await killDevice(runner, cfg, l.serial, l.emulatorPid);
   removeDeviceFiles(cfg, l.deviceId);
 }

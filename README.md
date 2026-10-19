@@ -42,6 +42,7 @@ Building takes a few minutes (system image install if missing, first boot, snaps
 droidpool get [--clean|--signed-in] [--api N] [--project P]   # prints the serial
 droidpool release <serial>
 droidpool renew <serial>      # extend a CLI lease
+droidpool show <serial>       # open a scrcpy mirror window on the device
 droidpool ls
 droidpool gc                  # reap expired leases, dead emulators, orphan clones
 droidpool doctor              # bases, devices, free disk, emulator version mismatches
@@ -53,7 +54,10 @@ CLI leases expire after 2 hours unless renewed. Devices taken through the MCP se
 
 - `get_device`: `flavor` (clean | signed-in), `api`, `project` (absolute path), `reuse_serial`. Returns `{ serial, deviceId, flavor, api }`. Waits up to 90 s if the pool is full (max 3 devices), then fails.
 - `release_device`: `serial`.
+- `show_device`: `serial`. Opens a scrcpy mirror window so the user can watch or interact.
 - `list_devices`.
+
+Devices have no window of their own. `show` mirrors one with scrcpy v5.0.1, which droidpool downloads once from the official GitHub release into `~/.droidpool/tools` and checks against its pinned SHA-256 (Homebrew is not used). It talks to the SDK's adb, so it does not start a second adb server. The window closes when the device is released.
 
 Launch flags are owned by droidpool (`-avd <id> -port <p> -no-snapshot-save -no-boot-anim -no-window`), so snapshots stay valid.
 

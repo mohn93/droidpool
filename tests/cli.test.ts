@@ -9,6 +9,7 @@ import { withState, type BaseRecord } from '../src/state.ts';
 import { deviceIni } from '../src/avdfiles.ts';
 import { runCli } from '../src/cli.ts';
 import { doctorReport } from '../src/doctor.ts';
+import { scrcpyDir } from '../src/viewer.ts';
 
 const VERSION = '36.5.11';
 
@@ -223,4 +224,18 @@ test('cli runs command when reap throws', async () => {
   assert.equal(r.code, 0);
   assert.match(r.out, /^SERIAL +ID/);
   assert.match(r.err, /^droidpool: reap failed: /);
+});
+
+test('show opens a mirror window for a device', async () => {
+  const { cfg } = setup();
+  const fr = fakeRunner(cfg).onSpawn(5001, 8100);
+  await run(cfg, fr, ['get', '--project', '/apps/shop']);
+  const bin = path.join(scrcpyDir(cfg), 'scrcpy');
+  fs.mkdirSync(path.dirname(bin), { recursive: true });
+  fs.writeFileSync(bin, '#!/bin/sh\n');
+  const r = await run(cfg, fr, ['show', 'emulator-5620']);
+  assert.equal(r.code, 0);
+  assert.match(r.out, /^showing emulator-5620 in a window titled "emulator-5620 \(shop\)"\n$/);
+  assert.ok(fr.calls.some((c) => c.kind === 'spawn' && c.cmd === bin));
+  assert.equal((await run(cfg, fr, ['show'])).code, 2);
 });

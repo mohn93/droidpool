@@ -9,6 +9,7 @@ import { ensureDirs, loadConfig, type Config } from './config.ts';
 import { realRunner, type Runner } from './exec.ts';
 import { getDevice, listDevices, reap, releaseDevice } from './pool.ts';
 import { withState } from './state.ts';
+import { showDevice } from './viewer.ts';
 
 export interface McpDeps {
   runner: Runner;
@@ -66,6 +67,16 @@ export function createServer(deps: McpDeps): McpServer {
       inputSchema: { serial: z.string().describe('serial returned by get_device') },
     },
     (args) => toResult(async () => (await releaseDevice(runner, cfg, args.serial, { requireOwnerPid: pid })).message),
+  );
+
+  server.registerTool(
+    'show_device',
+    {
+      description:
+        'Open a window on the user\'s screen mirroring a device (scrcpy), so the user can watch or interact, for example to log in by hand. Devices are headless otherwise. The window closes when the device is released.',
+      inputSchema: { serial: z.string().describe('serial returned by get_device') },
+    },
+    (args) => toResult(() => showDevice(runner, cfg, args.serial)),
   );
 
   server.registerTool(

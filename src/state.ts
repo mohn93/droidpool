@@ -28,6 +28,8 @@ export interface Lease {
   owner: Owner;
   createdAt: number;
   state: 'booting' | 'ready';
+  /** pid of the scrcpy mirror window opened by `droidpool show`, if any. */
+  viewerPid?: number;
 }
 
 export interface State {

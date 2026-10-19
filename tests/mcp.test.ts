@@ -10,6 +10,7 @@ import { FakeRunner } from './fakes.ts';
 import { readState, withState, type BaseRecord, type Lease } from '../src/state.ts';
 import { createServer, markGone, scheduleReaper } from '../src/mcp.ts';
 import { reap } from '../src/pool.ts';
+import { scrcpyDir } from '../src/viewer.ts';
 
 const VERSION = '36.5.11';
 const PID = 4242;
@@ -80,11 +81,11 @@ function text(res: unknown): string {
   return c[0]!.text;
 }
 
-test('lists three tools', async () => {
+test('lists four tools', async () => {
   const { cfg } = setup();
   const { client, close } = await connect(cfg, fakeRunner(cfg));
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map((t) => t.name).sort(), ['get_device', 'list_devices', 'release_device']);
+  assert.deepEqual(tools.map((t) => t.name).sort(), ['get_device', 'list_devices', 'release_device', 'show_device']);
   await close();
 });
 
@@ -237,4 +238,21 @@ test('reap racing a clean exit keeps the exit mark while the owner pid is alive'
   assert.deepEqual(await reap(r, cfg, gone + cfg.ownerGraceMs + 1), ['dev-aaaaa0']);
   assert.equal(readState(cfg.stateFile).leases.length, 0);
   assert.ok(!fs.existsSync(path.join(cfg.avdHome, 'dev-aaaaa0.avd')));
+});
+
+test('show_device opens a mirror window for the device', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg).onSpawn(5001, 8100);
+  const { client, close } = await connect(cfg, r);
+  const got = JSON.parse(text(await client.callTool({ name: 'get_device', arguments: { project: '/apps/shop' } })));
+  const bin = path.join(scrcpyDir(cfg), 'scrcpy');
+  fs.mkdirSync(path.dirname(bin), { recursive: true });
+  fs.writeFileSync(bin, '#!/bin/sh\n');
+  const res = await client.callTool({ name: 'show_device', arguments: { serial: got.serial } });
+  assert.ok(!res.isError);
+  assert.match(text(res), /showing emulator-5620/);
+  const bad = await client.callTool({ name: 'show_device', arguments: { serial: 'emulator-5699' } });
+  assert.equal(bad.isError, true);
+  assert.match(text(bad), /no device emulator-5699/);
+  await close();
 });
