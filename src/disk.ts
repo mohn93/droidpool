@@ -1,20 +1,52 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import type { Runner } from './exec.ts';
 import type { Config } from './config.ts';
 
 const GB = 2 ** 30;
 
-/** APFS clonefile copy. Never falls back to a full copy. */
-export async function cloneDir(runner: Runner, src: string, dest: string): Promise<void> {
-  const r = await runner.run('cp', ['-c', '-R', src, dest]);
+const APFS_FSTYPE = 26;
+
+export interface CloneProbe {
+  dev(path: string): number;
+  fsType(path: string): number;
+}
+
+const realProbe: CloneProbe = {
+  dev: (p) => fs.statSync(p).dev,
+  fsType: (p) => fs.statfsSync(p).type,
+};
+
+/**
+ * APFS clonefile copy. `cp -c` silently falls back to a full copy when cloning is
+ * impossible, so we refuse up front unless a clone is guaranteed.
+ */
+export async function cloneDir(
+  runner: Runner,
+  src: string,
+  dest: string,
+  probe: CloneProbe = realProbe,
+): Promise<void> {
+  const fail = (reason: string) => new Error(`clone failed (APFS required): ${reason}`);
+  if (fs.existsSync(dest)) throw fail('dest already exists');
+  const destParent = path.dirname(dest);
+  if (probe.dev(src) !== probe.dev(destParent)) throw fail('src and dest on different volumes');
+  if (probe.fsType(destParent) !== APFS_FSTYPE) throw fail('dest filesystem is not APFS');
+  let r;
+  try {
+    r = await runner.run('cp', ['-c', '-R', src, dest]);
+  } catch (e) {
+    fs.rmSync(dest, { recursive: true, force: true });
+    throw e;
+  }
   if (r.code !== 0) {
     fs.rmSync(dest, { recursive: true, force: true });
-    throw new Error(`clone failed (APFS required): ${r.stderr.trim()}`);
+    throw fail(r.stderr.trim());
   }
 }
 
-export function freeBytes(path: string): number {
-  const s = fs.statfsSync(path);
+export function freeBytes(p: string): number {
+  const s = fs.statfsSync(p);
   return s.bavail * s.bsize;
 }
 
