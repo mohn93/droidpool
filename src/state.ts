@@ -95,7 +95,8 @@ const BREAK_STALE_MS = 5_000;
 
 // Breaking is serialized by a second mkdir mutex so a slow breaker cannot
 // rename away a lock that someone else acquired after the first break.
-function breakLock(lockDir: string): void {
+// Returns false when another breaker holds the mutex, so the caller should back off.
+function breakLock(lockDir: string): boolean {
   const mutex = `${lockDir}.break`;
   try {
     fs.mkdirSync(mutex);
@@ -108,17 +109,18 @@ function breakLock(lockDir: string): void {
     } catch {
       // vanished; caller retries
     }
-    return;
+    return false;
   }
   try {
-    if (!lockIsStale(lockDir)) return;
+    if (!lockIsStale(lockDir)) return true;
     const grave = `${lockDir}.${process.pid}.${Date.now()}.stale`;
     try {
       fs.renameSync(lockDir, grave);
     } catch {
-      return;
+      return true;
     }
     fs.rmSync(grave, { recursive: true, force: true });
+    return true;
   } finally {
     fs.rmSync(mutex, { recursive: true, force: true });
   }
@@ -134,10 +136,7 @@ async function acquire(lockDir: string): Promise<number> {
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
     }
-    if (lockIsStale(lockDir)) {
-      breakLock(lockDir);
-      continue;
-    }
+    if (lockIsStale(lockDir) && breakLock(lockDir)) continue;
     await new Promise((r) => setTimeout(r, RETRY_MS));
   }
 }
