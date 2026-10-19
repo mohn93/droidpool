@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { loadConfig, ensureDirs } from '../src/config.ts';
+import { freeBytes } from '../src/disk.ts';
 
 test('loadConfig defaults', () => {
   const c = loadConfig({ HOME: '/h' });
@@ -17,6 +18,8 @@ test('loadConfig defaults', () => {
   assert.equal(c.ownerGraceMs, 120000);
   assert.equal(c.cliTtlMs, 7200000);
   assert.equal(c.queueWaitMs, 90000);
+  assert.equal(c.queuePollMs, 1000);
+  assert.equal(c.freeBytesFn, freeBytes);
   assert.equal(c.bootTimeoutMs, 180000);
   assert.equal(c.killWaitMs, 15000);
   assert.equal(c.baseSettleMs, 30000);

@@ -10,7 +10,7 @@ export interface FakeCall {
 }
 
 type Matcher = (cmd: string, args: string[]) => boolean;
-type Scripted = RunResult | (() => RunResult);
+type Scripted = RunResult | ((cmd: string, args: string[]) => RunResult);
 
 export class FakeRunner implements Runner {
   calls: FakeCall[] = [];
@@ -18,6 +18,7 @@ export class FakeRunner implements Runner {
   killed: { pid: number; signal?: NodeJS.Signals }[] = [];
   private scripts: { match: Matcher; result: Scripted }[] = [];
   private nextPid = 1000;
+  private pidQueue: number[] = [];
 
   /** Later registrations win over earlier ones. */
   onRun(match: Matcher, result: Scripted): this {
@@ -25,10 +26,15 @@ export class FakeRunner implements Runner {
     return this;
   }
 
-  /** Sets the pid returned by the next spawnDetached and marks it alive. */
-  onSpawn(pid: number): this {
-    this.nextPid = pid;
-    this.alive.add(pid);
+  /**
+   * Queues pids handed out by successive spawnDetached calls and marks them alive.
+   * Once the queue is drained, the last pid keeps being returned.
+   */
+  onSpawn(...pids: number[]): this {
+    if (pids.length === 0) throw new Error('onSpawn needs at least one pid');
+    for (const p of pids) this.alive.add(p);
+    this.pidQueue = pids.slice();
+    this.nextPid = pids[pids.length - 1]!;
     return this;
   }
 
@@ -40,7 +46,7 @@ export class FakeRunner implements Runner {
     this.calls.push({ kind: 'run', cmd, args, env: opts.env, input: opts.input });
     for (let i = this.scripts.length - 1; i >= 0; i--) {
       const s = this.scripts[i]!;
-      if (s.match(cmd, args)) return typeof s.result === 'function' ? s.result() : s.result;
+      if (s.match(cmd, args)) return typeof s.result === 'function' ? s.result(cmd, args) : s.result;
     }
     return { code: 0, stdout: '', stderr: '' };
   }
@@ -51,7 +57,7 @@ export class FakeRunner implements Runner {
     opts: { env?: NodeJS.ProcessEnv; logFile: string },
   ): number {
     this.calls.push({ kind: 'spawn', cmd, args, env: opts.env, logFile: opts.logFile });
-    const pid = this.nextPid;
+    const pid = this.pidQueue.shift() ?? this.nextPid;
     this.alive.add(pid);
     return pid;
   }

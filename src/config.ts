@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { freeBytes, type CloneProbe } from './disk.ts';
 
 export interface Config {
   home: string;
@@ -18,6 +19,7 @@ export interface Config {
   ownerGraceMs: number;
   cliTtlMs: number;
   queueWaitMs: number;
+  queuePollMs: number;
   bootTimeoutMs: number;
   killWaitMs: number;
   baseSettleMs: number;
@@ -25,6 +27,9 @@ export interface Config {
   portMin: number;
   portMax: number;
   supportedApis: number[];
+  freeBytesFn: (path: string) => number;
+  /** Test seam for cloneDir's same-volume/APFS checks; unset means the real probe. */
+  cloneProbe?: CloneProbe;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -48,6 +53,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ownerGraceMs: 120_000,
     cliTtlMs: 7_200_000,
     queueWaitMs: 90_000,
+    queuePollMs: 1000,
     bootTimeoutMs: 180_000,
     killWaitMs: 15_000,
     baseSettleMs: 30_000,
@@ -55,6 +61,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     portMin: 5620,
     portMax: 5680,
     supportedApis: [35],
+    freeBytesFn: freeBytes,
   };
 }
 
