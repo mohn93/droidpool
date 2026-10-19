@@ -122,6 +122,10 @@ export async function buildBase(
       }
     }
     removeAvdFiles(cfg, name);
+    // --force overwrote any previous AVD, so its record no longer describes real files.
+    await withState(cfg.stateFile, (s) => {
+      s.bases = s.bases.filter((b) => b.name !== name);
+    });
     throw e;
   }
 }

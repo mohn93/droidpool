@@ -186,6 +186,28 @@ test('buildBase failure removes partial base', async () => {
   assert.equal(r.alive.size, 0);
 });
 
+test('buildBase failure over an existing base drops its record', async () => {
+  const { cfg } = setup();
+  const old: BaseRecord = {
+    name: 'base-clean-35',
+    flavor: 'clean',
+    api: 35,
+    image: imageFor('clean', 35),
+    emulatorVersion: '36.5.11',
+    ramMb: 4096,
+    builtAt: 'x',
+  };
+  await withState(cfg.stateFile, (s) => {
+    s.bases.push(old);
+  });
+  fs.mkdirSync(path.join(cfg.avdHome, 'base-clean-35.avd'), { recursive: true });
+  const r = emulatorFake('36.5.11');
+  scriptBuild(r, cfg, 'base-clean-35', false);
+  await assert.rejects(buildBase(r, cfg, 'clean', 35, io()), /snapshot save failed/);
+  assert.ok(!fs.existsSync(path.join(cfg.avdHome, 'base-clean-35.avd')));
+  assert.ok(!readState(cfg.stateFile).bases.some((b) => b.name === 'base-clean-35'));
+});
+
 test('removeBase refuses with active devices, else removes', async () => {
   const { cfg } = setup();
   const r = emulatorFake('36.5.11');
