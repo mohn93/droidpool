@@ -42,6 +42,29 @@ function removeAvdFiles(cfg: Config, name: string): void {
   fs.rmSync(path.join(cfg.avdHome, `${name}.ini`), { force: true });
 }
 
+/** The base emulator that buildBase has running right now, so a Ctrl-C handler can stop it. */
+let liveBuild: { pid: number; name: string } | undefined;
+
+export function currentBuildPid(): number | undefined {
+  return liveBuild?.pid;
+}
+
+/**
+ * Synchronous best effort for signal handlers: SIGKILL the live base emulator and remove the
+ * partial base AVD files. A no-op when no base emulator is running.
+ */
+export function abortCurrentBuild(runner: Runner, cfg: Config): void {
+  const b = liveBuild;
+  if (!b) return;
+  liveBuild = undefined;
+  runner.kill(b.pid, 'SIGKILL');
+  try {
+    removeAvdFiles(cfg, b.name);
+  } catch {
+    // best effort; the process is exiting
+  }
+}
+
 /** Number of even ports above the pool range that base builds may use. */
 const BASE_PORT_SPAN = 20;
 
@@ -103,6 +126,7 @@ export async function buildBase(
     serial = `emulator-${port}`;
     io.log(`booting ${name} on ${serial}`);
     pid = launchDevice(runner, cfg, name, port, { snapshotSave: true, window: flavor === 'signed-in' });
+    liveBuild = { pid, name };
     await waitBoot(runner, cfg, serial, pid, path.join(cfg.logsDir, `${name}.log`), cfg.bootPollMs);
     io.log(`settling for ${Math.round(cfg.baseSettleMs / 1000)}s`);
     await sleep(cfg.baseSettleMs);
@@ -116,6 +140,7 @@ export async function buildBase(
     await saveSnapshot(runner, cfg, serial);
     await killDevice(runner, cfg, serial, pid);
     pid = undefined;
+    liveBuild = undefined;
 
     const record: BaseRecord = {
       name,
@@ -139,6 +164,7 @@ export async function buildBase(
         // best effort; the original error matters more
       }
     }
+    liveBuild = undefined;
     removeAvdFiles(cfg, name);
     // --force overwrote any previous AVD, so its record no longer describes real files.
     try {

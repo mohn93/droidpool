@@ -5,7 +5,7 @@ import readline from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { ensureDirs, loadConfig, type Config } from './config.ts';
 import { realRunner, type Runner } from './exec.ts';
-import { buildBase, listBases, removeBase } from './base.ts';
+import { abortCurrentBuild, buildBase, currentBuildPid, listBases, removeBase } from './base.ts';
 import { getDevice, listDevices, releaseDevice, renewLease, reap } from './pool.ts';
 import { doctorReport } from './doctor.ts';
 import type { Flavor } from './state.ts';
@@ -187,13 +187,16 @@ function isMain(): boolean {
 }
 
 if (isMain()) {
+  const cfg = loadConfig();
   process.on('SIGINT', () => {
     process.stderr.write('droidpool: interrupted\n');
+    // A base build's emulator is detached, so it would outlive us without this.
+    if (currentBuildPid() !== undefined) abortCurrentBuild(realRunner, cfg);
     process.exit(130);
   });
   const code = await runCli(process.argv.slice(2), {
     runner: realRunner,
-    cfg: loadConfig(),
+    cfg,
     out: (s) => process.stdout.write(s),
     err: (s) => process.stderr.write(s),
     waitForUser: realWaitForUser,

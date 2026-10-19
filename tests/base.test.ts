@@ -7,7 +7,16 @@ import { loadConfig, type Config } from '../src/config.ts';
 import { FakeRunner } from './fakes.ts';
 import { withState, readState, type BaseRecord, type Lease } from '../src/state.ts';
 import { TUNED_CONFIG } from '../src/avdfiles.ts';
-import { assertBaseUsable, buildBase, baseName, imageFor, listBases, removeBase } from '../src/base.ts';
+import {
+  abortCurrentBuild,
+  assertBaseUsable,
+  buildBase,
+  baseName,
+  currentBuildPid,
+  imageFor,
+  listBases,
+  removeBase,
+} from '../src/base.ts';
 
 function setup() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dp-base-'));
@@ -286,4 +295,39 @@ test('buildBase fails when every base port is taken', async () => {
   r.onRun((c, a) => c === cfg.adbBin && a[0] === 'devices', { code: 0, stdout: `List of devices attached\n${listed}\n`, stderr: '' });
   await assert.rejects(buildBase(r, cfg, 'clean', 35, io()), { message: 'no free port for base build' });
   assert.ok(!r.calls.some((c) => c.kind === 'spawn'));
+});
+
+test('currentBuildPid is set during boot and cleared after', async () => {
+  for (const snapshotOk of [true, false]) {
+    const { cfg } = setup();
+    const r = emulatorFake('36.5.11');
+    scriptBuild(r, cfg, 'base-clean-35', snapshotOk);
+    const seen: (number | undefined)[] = [];
+    r.onRun((c, a) => c === cfg.adbBin && a.includes('getprop'), () => {
+      seen.push(currentBuildPid());
+      return { code: 0, stdout: '1\n', stderr: '' };
+    });
+    assert.equal(currentBuildPid(), undefined);
+    const build = buildBase(r, cfg, 'clean', 35, io());
+    if (snapshotOk) await build;
+    else await assert.rejects(build, /snapshot save failed/);
+    assert.deepEqual(seen, [4242]);
+    assert.equal(currentBuildPid(), undefined);
+  }
+});
+
+test('abortCurrentBuild kills the base emulator and removes its files', async () => {
+  const { cfg } = setup();
+  const r = emulatorFake('36.5.11');
+  scriptBuild(r, cfg, 'base-clean-35');
+  r.onRun((c, a) => c === cfg.adbBin && a.includes('getprop'), () => {
+    abortCurrentBuild(r, cfg); // what the CLI SIGINT handler does
+    return { code: 1, stdout: '', stderr: 'offline' };
+  });
+  await assert.rejects(buildBase(r, cfg, 'clean', 35, io()), /emulator exited/);
+  assert.deepEqual(r.killed[0], { pid: 4242, signal: 'SIGKILL' });
+  assert.equal(currentBuildPid(), undefined);
+  assert.ok(!fs.existsSync(path.join(cfg.avdHome, 'base-clean-35.avd')));
+  abortCurrentBuild(r, cfg); // no build running: no-op
+  assert.equal(r.killed.length, 1);
 });
