@@ -374,12 +374,13 @@ test('reuseSerial adopts a gone owner within grace', async () => {
   await seed(cfg, lease({ owner: { kind: 'mcp', pid: DEAD_PID, goneSince: Date.now() - 1000 } }));
   const info = await getDevice(r, cfg, {
     flavor: 'clean',
-    project: '/p',
+    project: '/q',
     owner: { kind: 'mcp', pid: process.pid },
     reuseSerial: 'emulator-5620',
   });
   assert.equal(info.serial, 'emulator-5620');
   assert.equal(info.deviceId, 'dev-aaaaaa');
+  assert.equal(info.project, '/q');
   assert.deepEqual(info.owner, { kind: 'mcp', pid: process.pid });
   assert.equal(cpCalls(r), 0);
   assert.ok(!r.calls.some((c) => c.kind === 'spawn'));
@@ -433,4 +434,106 @@ test('renewLease extends cli leases and leaves mcp leases unchanged', async () =
   assert.deepEqual(readState(cfg.stateFile).leases[0]!.owner, { kind: 'cli', expiresAt: exp });
   assert.deepEqual((await renewLease(cfg, 'emulator-5622')).owner, { kind: 'mcp', pid: 7777 });
   await assert.rejects(renewLease(cfg, 'emulator-5699'), { message: 'no device emulator-5699' });
+});
+
+/**
+ * Puts `x` into state after getDevice's entry reap has decided, simulating a lease that reap
+ * would remove but has not yet. A decoy expired lease makes reap tear down; its `emu kill`
+ * (run outside the lock) writes `x` in. The final lease drop only removes the decoy.
+ */
+async function injectAfterEntryReap(r: FakeRunner, cfg: Config, x: Lease): Promise<void> {
+  const decoy = lease({
+    deviceId: 'dev-dddddd',
+    serial: 'emulator-5680',
+    port: 5680,
+    emulatorPid: 7100,
+    owner: { kind: 'cli', expiresAt: 1 },
+  });
+  r.alive.add(7100);
+  await seed(cfg, decoy);
+  fs.mkdirSync(devDir(cfg, x.deviceId), { recursive: true });
+  r.onRun(
+    (c, a) => c === cfg.adbBin && a.join(' ') === '-s emulator-5680 emu kill',
+    () => {
+      const st = readState(cfg.stateFile);
+      st.leases.push(x);
+      fs.writeFileSync(cfg.stateFile, JSON.stringify(st));
+      return { code: 0, stdout: '', stderr: '' };
+    },
+  );
+}
+
+const reuseReq = (serial: string, flavor: 'clean' | 'signed-in' = 'clean') => ({
+  flavor,
+  project: '/q',
+  owner: { kind: 'mcp' as const, pid: process.pid },
+  reuseSerial: serial,
+});
+
+test('reuseSerial past grace gets a fresh device', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg).onSpawn(5001);
+  r.alive.add(7001);
+  const goneSince = Date.now() - cfg.ownerGraceMs - 1000;
+  await injectAfterEntryReap(r, cfg, lease({ owner: { kind: 'mcp', pid: DEAD_PID, goneSince } }));
+  const info = await getDevice(r, cfg, reuseReq('emulator-5620'));
+  assert.notEqual(info.deviceId, 'dev-aaaaaa');
+  assert.notEqual(info.serial, 'emulator-5620');
+  assert.equal(cpCalls(r), 1);
+  const orig = readState(cfg.stateFile).leases.find((l) => l.deviceId === 'dev-aaaaaa')!;
+  assert.deepEqual(orig.owner, { kind: 'mcp', pid: DEAD_PID, goneSince });
+  assert.equal(orig.project, '/p');
+});
+
+test('reuseSerial with dead emulator gets a fresh device', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg).onSpawn(5001);
+  const goneSince = Date.now() - 1000;
+  await injectAfterEntryReap(
+    r,
+    cfg,
+    lease({ emulatorPid: DEAD_PID, owner: { kind: 'mcp', pid: DEAD_PID, goneSince } }),
+  );
+  const info = await getDevice(r, cfg, reuseReq('emulator-5620'));
+  assert.notEqual(info.deviceId, 'dev-aaaaaa');
+  assert.notEqual(info.serial, 'emulator-5620');
+  assert.equal(cpCalls(r), 1);
+  const orig = readState(cfg.stateFile).leases.find((l) => l.deviceId === 'dev-aaaaaa')!;
+  assert.deepEqual(orig.owner, { kind: 'mcp', pid: DEAD_PID, goneSince });
+});
+
+test('reuseSerial same owner returns its lease', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg);
+  r.alive.add(7001).add(process.pid);
+  await seed(cfg, lease({ owner: { kind: 'mcp', pid: process.pid } }));
+  const info = await getDevice(r, cfg, reuseReq('emulator-5620'));
+  assert.equal(info.deviceId, 'dev-aaaaaa');
+  assert.equal(info.project, '/p');
+  assert.equal(cpCalls(r), 0);
+  assert.equal(readState(cfg.stateFile).leases.length, 1);
+});
+
+test('reuseSerial on booting lease says still booting', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg);
+  await seed(cfg, lease({ state: 'booting', emulatorPid: 0, owner: { kind: 'mcp', pid: DEAD_PID } }));
+  await assert.rejects(getDevice(r, cfg, reuseReq('emulator-5620')), {
+    message: 'device emulator-5620 is still booting',
+  });
+  assert.equal(cpCalls(r), 0);
+});
+
+test('reuseSerial flavor mismatch gets a fresh device', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg).onSpawn(5001);
+  r.alive.add(7001);
+  const goneSince = Date.now() - 1000;
+  await seed(cfg, lease({ flavor: 'signed-in', owner: { kind: 'mcp', pid: DEAD_PID, goneSince } }));
+  const info = await getDevice(r, cfg, reuseReq('emulator-5620'));
+  assert.notEqual(info.deviceId, 'dev-aaaaaa');
+  assert.equal(info.serial, 'emulator-5622');
+  assert.equal(info.flavor, 'clean');
+  const orig = readState(cfg.stateFile).leases.find((l) => l.deviceId === 'dev-aaaaaa')!;
+  assert.deepEqual(orig.owner, { kind: 'mcp', pid: DEAD_PID, goneSince });
 });

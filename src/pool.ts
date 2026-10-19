@@ -80,6 +80,34 @@ function newDeviceId(cfg: Config, s: State): string {
   }
 }
 
+/**
+ * reuseSerial decision, run under the state lock. Returns the device to hand back, or
+ * undefined to fall through to a fresh device. Adoption also requires the lease to be
+ * outside every reap condition, so a concurrent reaper cannot be tearing it down.
+ */
+function tryAdopt(
+  runner: Runner,
+  cfg: Config,
+  l: Lease,
+  req: { flavor: Flavor; project: string },
+  api: number,
+  owner: Owner,
+  now: number,
+): DeviceInfo | undefined {
+  if (l.state === 'booting') throw new Error(`device ${l.serial} is still booting`);
+  const o = l.owner;
+  if (o.kind === 'mcp' && owner.kind === 'mcp' && o.pid === owner.pid) return toInfo(l);
+  if (l.flavor !== req.flavor || l.api !== api) return undefined;
+  if (o.kind === 'cli' || (o.goneSince === undefined && runner.isAlive(o.pid))) {
+    throw new Error(`device ${l.serial} is owned by another live session`);
+  }
+  const withinGrace = o.goneSince === undefined || now - o.goneSince <= cfg.ownerGraceMs;
+  if (!withinGrace || !pidAlive(runner, l.emulatorPid)) return undefined;
+  l.owner = owner;
+  l.project = req.project;
+  return toInfo(l);
+}
+
 export async function getDevice(
   runner: Runner,
   cfg: Config,
@@ -94,14 +122,7 @@ export async function getDevice(
     const serial = req.reuseSerial;
     const adopted = await withState(cfg.stateFile, (s) => {
       const l = s.leases.find((x) => x.serial === serial);
-      if (!l) return undefined;
-      const adoptable =
-        l.state === 'ready' &&
-        l.owner.kind === 'mcp' &&
-        (l.owner.goneSince !== undefined || !runner.isAlive(l.owner.pid));
-      if (!adoptable) throw new Error(`device ${serial} is owned by another live session`);
-      l.owner = owner;
-      return toInfo(l);
+      return l ? tryAdopt(runner, cfg, l, req, api, owner, Date.now()) : undefined;
     });
     if (adopted) return adopted;
   }
