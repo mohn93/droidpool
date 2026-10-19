@@ -190,3 +190,23 @@ test('doctor with no bases', async () => {
   fs.writeFileSync(cfg.stateFile, JSON.stringify({ bases: [], leases: [] }));
   assert.match(await doctorReport(fakeRunner(cfg), cfg), /^bases on disk: 0$/m);
 });
+
+test('gc prints removed ids', async () => {
+  const { cfg } = setup();
+  const id = 'dev-bbbbbb';
+  const dir = path.join(cfg.avdHome, `${id}.avd`);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(cfg.avdHome, `${id}.ini`), deviceIni(dir, 35));
+  await withState(cfg.stateFile, (s) => {
+    s.leases.push({
+      deviceId: id, serial: 'emulator-5622', port: 5622, emulatorPid: 7002, flavor: 'clean', api: 35,
+      project: '/p', owner: { kind: 'cli', expiresAt: Date.now() - 1000 }, createdAt: Date.now() - 10_000, state: 'ready',
+    });
+  });
+  const fr = fakeRunner(cfg);
+  fr.alive.add(7002);
+  const r = await run(cfg, fr, ['gc']);
+  assert.equal(r.code, 0);
+  assert.equal(r.out, `${id}\n`);
+  assert.ok(!fs.existsSync(dir));
+});

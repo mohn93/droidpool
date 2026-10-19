@@ -48,7 +48,7 @@ function table(rows: string[][]): string {
   return rows.map((r) => r.map((c, i) => c.padEnd(widths[i]!)).join('  ').trimEnd()).join('\n') + '\n';
 }
 
-async function dispatch(argv: string[], deps: CliDeps): Promise<void> {
+async function dispatch(argv: string[], deps: CliDeps, reaped: string[]): Promise<void> {
   const { runner, cfg, out, err } = deps;
   const [cmd, ...rest] = argv;
   const opts = { strict: true, allowPositionals: true } as const;
@@ -128,8 +128,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<void> {
     }
     case 'gc': {
       parseArgs({ ...opts, args: rest, allowPositionals: false });
-      const removed = await reap(runner, cfg);
-      if (removed.length > 0) out(removed.join('\n') + '\n');
+      if (reaped.length > 0) out(reaped.join('\n') + '\n');
       return;
     }
     case 'doctor': {
@@ -145,8 +144,8 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<void> {
 export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   try {
     ensureDirs(deps.cfg);
-    await reap(deps.runner, deps.cfg);
-    await dispatch(argv, deps);
+    const reaped = await reap(deps.runner, deps.cfg);
+    await dispatch(argv, deps, reaped);
     return 0;
   } catch (e) {
     const isUsage = e instanceof UsageError || (e instanceof TypeError && String((e as { code?: unknown }).code).startsWith('ERR_PARSE_ARGS'));
