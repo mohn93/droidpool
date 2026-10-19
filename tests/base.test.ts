@@ -208,6 +208,24 @@ test('buildBase failure over an existing base drops its record', async () => {
   assert.ok(!readState(cfg.stateFile).bases.some((b) => b.name === 'base-clean-35'));
 });
 
+test('buildBase failure keeps original error when record cleanup fails', async () => {
+  const { cfg } = setup();
+  const r = emulatorFake('36.5.11');
+  scriptBuild(r, cfg, 'base-clean-35', false);
+  r.onRun(
+    (c, a) => c === cfg.adbBin && a.includes('snapshot'),
+    () => {
+      fs.chmodSync(cfg.home, 0o500); // state lock dir can no longer be created
+      return { code: 1, stdout: 'KO\n', stderr: 'boom' };
+    },
+  );
+  try {
+    await assert.rejects(buildBase(r, cfg, 'clean', 35, io()), /snapshot save failed/);
+  } finally {
+    fs.chmodSync(cfg.home, 0o700);
+  }
+});
+
 test('removeBase refuses with active devices, else removes', async () => {
   const { cfg } = setup();
   const r = emulatorFake('36.5.11');
