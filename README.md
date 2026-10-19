@@ -8,11 +8,14 @@ Mac (APFS) only in v1. Uses the stock Android emulator; 36.5.11 is the tested ve
 
 ```
 npm install
-npm link
-claude mcp add droidpool -- droidpool-mcp
+ln -sf "$PWD/src/cli.ts" ~/.local/bin/droidpool        # any directory on PATH
+ln -sf "$PWD/src/mcp.ts" ~/.local/bin/droidpool-mcp
+claude mcp add droidpool --scope user -- ~/.local/bin/droidpool-mcp
 ```
 
-Then paste `guidance/agents.md` into `~/.claude/CLAUDE.md` so agents use droidpool and not `emulator` or `avdmanager`.
+`npm link` also works when npm's global bin directory is on PATH. Use `--scope user` so every project gets the tools; without it the server is registered for the current project only. Register the absolute path so the server starts regardless of the agent's PATH.
+
+Then paste `guidance/agents.md` into `~/.claude/CLAUDE.md` so agents use droidpool and not `emulator` or `avdmanager`. Sessions that were already running see the tools after a restart.
 
 Requires Node >= 22.18 and an Android SDK (`ANDROID_SDK_ROOT`, `ANDROID_HOME`, or `~/Library/Android/sdk`) with the emulator, platform-tools and cmdline-tools.
 
