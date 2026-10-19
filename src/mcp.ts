@@ -63,7 +63,7 @@ export function createServer(deps: McpDeps): McpServer {
       description: 'Release a device you got from get_device.',
       inputSchema: { serial: z.string().describe('serial returned by get_device') },
     },
-    (args) => toResult(async () => (await releaseDevice(runner, cfg, args.serial)).message),
+    (args) => toResult(async () => (await releaseDevice(runner, cfg, args.serial, { requireOwnerPid: pid })).message),
   );
 
   server.registerTool(

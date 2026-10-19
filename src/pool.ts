@@ -213,17 +213,28 @@ export async function releaseDevice(
   runner: Runner,
   cfg: Config,
   serial: string,
+  opts: { requireOwnerPid?: number } = {},
 ): Promise<{ released: boolean; message: string }> {
   const l = await withState(cfg.stateFile, (s) => {
     const found = s.leases.find((x) => x.serial === serial);
+    if (!found) return undefined;
     // A booting lease's emulator pid is not recorded yet; its getter owns the cleanup.
-    if (found?.state === 'booting') throw new Error(`device ${serial} is still booting`);
-    return found && { ...found };
+    if (found.state === 'booting') throw new Error(`device ${serial} is still booting`);
+    if (opts.requireOwnerPid !== undefined && !mayRelease(runner, found.owner, opts.requireOwnerPid, Date.now())) {
+      throw new Error(`device ${serial} belongs to another session`);
+    }
+    return { ...found };
   });
   if (!l) return { released: false, message: `no device ${serial}` };
   await teardown(runner, cfg, l);
   await dropLeases(cfg, [l.deviceId]);
   return { released: true, message: `released ${serial} (${l.deviceId})` };
+}
+
+/** True when `pid` owns the lease, or its owner is gone (dead mcp process or expired cli lease). */
+function mayRelease(runner: Runner, o: Owner, pid: number, now: number): boolean {
+  if (o.kind === 'cli') return o.expiresAt <= now;
+  return o.pid === pid || !runner.isAlive(o.pid);
 }
 
 export async function renewLease(cfg: Config, serial: string): Promise<DeviceInfo> {

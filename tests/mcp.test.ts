@@ -114,6 +114,40 @@ test('errors are tool errors, not crashes', async () => {
   await close();
 });
 
+test('mcp release_device refuses another live session\'s device', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg);
+  r.alive.add(OTHER_PID).add(7001);
+  const l: Lease = {
+    deviceId: 'dev-aaaaa0',
+    serial: 'emulator-5620',
+    port: 5620,
+    emulatorPid: 7001,
+    flavor: 'clean',
+    api: 35,
+    project: '/p',
+    owner: { kind: 'mcp', pid: OTHER_PID },
+    createdAt: Date.now(),
+    state: 'ready',
+  };
+  await withState(cfg.stateFile, (s) => {
+    s.leases.push(l);
+  });
+  const { client, close } = await connect(cfg, r);
+  const res = await client.callTool({ name: 'release_device', arguments: { serial: 'emulator-5620' } });
+  assert.equal(res.isError, true);
+  assert.equal(text(res), 'device emulator-5620 belongs to another session');
+  assert.equal(readState(cfg.stateFile).leases.length, 1);
+  assert.ok(r.isAlive(7001));
+  assert.ok(!r.calls.some((c) => c.args.includes('kill')));
+  // Once that owner is gone, the device may be released by anyone.
+  r.alive.delete(OTHER_PID);
+  const res2 = await client.callTool({ name: 'release_device', arguments: { serial: 'emulator-5620' } });
+  assert.notEqual(res2.isError, true);
+  assert.match(text(res2), /^released emulator-5620/);
+  await close();
+});
+
 test('shutdown releases owned devices only', async () => {
   const { cfg } = setup();
   const r = fakeRunner(cfg);
