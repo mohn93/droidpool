@@ -73,7 +73,7 @@ Free space inside a guest is not returned to the host (`fstrim` needs root on go
 DROIDPOOL_E2E=1 node scripts/e2e.ts
 ```
 
-Uses a temp `DROIDPOOL_HOME`, builds a clean base, gets two devices, checks both boot and load the snapshot, writes 200 MB in one, releases both, and prints boot seconds and freed MB. Needs about 15 GB free and ports 5620-5680 unused. Without `DROIDPOOL_E2E=1` it exits 0 immediately.
+Uses a temp `DROIDPOOL_HOME`, builds a clean base, gets two devices, checks both boot and load the snapshot, writes 200 MB in one, releases both, and prints boot seconds and freed MB. Needs about 15 GB free and ports 5620-5700 unused. It also asserts that `~/.android/avd` is unchanged and that no emulator process from the run outlives its release. Without `DROIDPOOL_E2E=1` it exits 0 immediately.
 
 ### Measured
 

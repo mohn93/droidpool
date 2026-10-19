@@ -39,11 +39,24 @@ if (free < need) {
   process.exit(1);
 }
 
+// droidpool must never touch the user's own AVDs.
+const userAvdDir = path.join(os.homedir(), '.android', 'avd');
+const avdListing = (): string[] => {
+  let names: string[];
+  try {
+    names = fs.readdirSync(userAvdDir).sort();
+  } catch {
+    return ['<absent>'];
+  }
+  return names.map((n) => `${n} ${fs.lstatSync(path.join(userAvdDir, n)).mtimeMs}`);
+};
+const userAvdsBefore = avdListing();
+
 const serials: string[] = [];
+const ids: string[] = [];
 try {
   await cli('base', 'build', 'clean');
 
-  const ids: string[] = [];
   for (let i = 0; i < 2; i++) {
     const t0 = Date.now();
     const serial = await cli('get', '--clean');
@@ -77,6 +90,11 @@ try {
   const freedMb = Math.round((cfg.freeBytesFn(home) - before) / 2 ** 20);
   console.log(`freed ${freedMb} MB`);
 
+  // No emulator from this run may outlive its release.
+  const ps = await realRunner.run('pgrep', ['-fl', 'qemu-system'], { timeoutMs: 10_000 });
+  const leftover = ps.stdout.split('\n').filter((l) => l.includes(home) || ids.some((id) => l.includes(id)));
+  assert.deepEqual(leftover, [], 'qemu-system processes remain after release');
+
   await cli('gc');
   const left = fs.readdirSync(cfg.avdHome).filter((n) => n.startsWith('dev-'));
   assert.deepEqual(left, [], 'dev-* dirs remain after gc');
@@ -93,4 +111,11 @@ try {
     await cli('gc');
   } catch {}
   fs.rmSync(home, { recursive: true, force: true });
+}
+
+try {
+  assert.deepEqual(avdListing(), userAvdsBefore, `${userAvdDir} changed during the run`);
+} catch (e) {
+  console.error(e instanceof Error ? e.message : e);
+  process.exitCode = 1;
 }
