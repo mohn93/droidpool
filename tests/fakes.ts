@@ -71,3 +71,19 @@ export class FakeRunner implements Runner {
     this.alive.delete(pid);
   }
 }
+
+/** Swallows process.stderr writes until restore(); text() returns what was written. */
+export function captureStderr(): { text: () => string; restore: () => void } {
+  const orig = process.stderr.write;
+  let buf = '';
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    buf += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  return {
+    text: () => buf,
+    restore: () => {
+      process.stderr.write = orig;
+    },
+  };
+}

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { loadConfig, type Config } from '../src/config.ts';
-import { FakeRunner } from './fakes.ts';
+import { captureStderr, FakeRunner } from './fakes.ts';
 import { readState, withState, type BaseRecord, type Lease } from '../src/state.ts';
 import { deviceIni } from '../src/avdfiles.ts';
 import {
@@ -536,4 +536,31 @@ test('reuseSerial flavor mismatch gets a fresh device', async () => {
   assert.equal(info.flavor, 'clean');
   const orig = readState(cfg.stateFile).leases.find((l) => l.deviceId === 'dev-aaaaaa')!;
   assert.deepEqual(orig.owner, { kind: 'mcp', pid: DEAD_PID, goneSince });
+});
+
+test('reap continues past a failing teardown', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg);
+  const now = Date.now();
+  const expired = { kind: 'cli' as const, expiresAt: now - 1 };
+  await seed(
+    cfg,
+    lease({ emulatorPid: DEAD_PID, owner: expired }),
+    lease({ deviceId: 'dev-bbbbbb', serial: 'emulator-5622', port: 5622, emulatorPid: DEAD_PID, owner: expired }),
+  );
+  const stuck = devDir(cfg, 'dev-aaaaaa');
+  fs.writeFileSync(path.join(stuck, 'userdata-qemu.img'), 'x');
+  fs.chmodSync(stuck, 0o500); // its contents can no longer be removed
+  const err = captureStderr();
+  let removed: string[];
+  try {
+    removed = await reap(r, cfg, now);
+  } finally {
+    err.restore();
+    fs.chmodSync(stuck, 0o700);
+  }
+  assert.deepEqual(removed, ['dev-bbbbbb']);
+  assert.deepEqual(readState(cfg.stateFile).leases.map((l) => l.deviceId), ['dev-aaaaaa']);
+  assert.ok(!fs.existsSync(devDir(cfg, 'dev-bbbbbb')));
+  assert.match(err.text(), /^droidpool: reap: dev-aaaaaa/m);
 });

@@ -256,8 +256,29 @@ export async function reap(runner: Runner, cfg: Config, now: number = Date.now()
     }
     return { victims, strays: [...strays] };
   });
-  for (const l of victims) await teardown(runner, cfg, l);
-  for (const id of strays) removeDeviceFiles(cfg, id);
-  await dropLeases(cfg, victims.map((l) => l.deviceId));
-  return [...victims.map((l) => l.deviceId), ...strays];
+  // One bad device must not block the rest; a victim whose teardown fails keeps its lease for the next reap.
+  const torn: string[] = [];
+  for (const l of victims) {
+    try {
+      await teardown(runner, cfg, l);
+      torn.push(l.deviceId);
+    } catch (e) {
+      logReapFailure(l.deviceId, e);
+    }
+  }
+  const swept: string[] = [];
+  for (const id of strays) {
+    try {
+      removeDeviceFiles(cfg, id);
+      swept.push(id);
+    } catch (e) {
+      logReapFailure(id, e);
+    }
+  }
+  await dropLeases(cfg, torn);
+  return [...torn, ...swept];
+}
+
+function logReapFailure(id: string, e: unknown): void {
+  process.stderr.write(`droidpool: reap: ${id}: ${e instanceof Error ? e.message : String(e)}\n`);
 }

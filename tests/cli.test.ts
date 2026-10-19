@@ -210,3 +210,17 @@ test('gc prints removed ids', async () => {
   assert.equal(r.out, `${id}\n`);
   assert.ok(!fs.existsSync(dir));
 });
+
+test('cli runs command when reap throws', async () => {
+  const { cfg } = setup();
+  fs.chmodSync(cfg.avdHome, 0o000); // reap cannot list device files
+  let r;
+  try {
+    r = await run(cfg, fakeRunner(cfg), ['ls']);
+  } finally {
+    fs.chmodSync(cfg.avdHome, 0o755);
+  }
+  assert.equal(r.code, 0);
+  assert.match(r.out, /^SERIAL +ID/);
+  assert.match(r.err, /^droidpool: reap failed: /);
+});

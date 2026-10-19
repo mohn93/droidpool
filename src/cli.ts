@@ -144,7 +144,13 @@ async function dispatch(argv: string[], deps: CliDeps, reaped: string[]): Promis
 export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   try {
     ensureDirs(deps.cfg);
-    const reaped = await reap(deps.runner, deps.cfg);
+    let reaped: string[] = [];
+    try {
+      reaped = await reap(deps.runner, deps.cfg);
+    } catch (e) {
+      // A broken reap must not lock the user out of release, ls or doctor.
+      deps.err(`droidpool: reap failed: ${e instanceof Error ? e.message : String(e)}\n`);
+    }
     await dispatch(argv, deps, reaped);
     return 0;
   } catch (e) {
