@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { realRunner } from '../src/exec.ts';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -30,4 +31,19 @@ test('realRunner.spawnDetached writes log and isAlive', async () => {
   assert.equal(realRunner.isAlive(pid), false);
   assert.match(fs.readFileSync(logFile, 'utf8'), /started/);
   fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('realRunner.run times out with grandchild', async () => {
+  const t0 = Date.now();
+  const r = await realRunner.run('sh', ['-c', 'sleep 7.31 & wait'], { timeoutMs: 100 });
+  assert.equal(r.code, 124);
+  assert.ok(Date.now() - t0 < 1000);
+  await sleep(200);
+  let found = '';
+  try {
+    found = execFileSync('pgrep', ['-f', 'sleep 7.31'], { encoding: 'utf8' });
+  } catch {
+    // pgrep exits 1 when nothing matches
+  }
+  assert.equal(found.trim(), '');
 });

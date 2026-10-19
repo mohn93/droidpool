@@ -35,13 +35,18 @@ export const realRunner: Runner = {
         clearTimeout(timer);
         resolve(r);
       };
-      const child = spawn(cmd, args, { env: opts.env ?? process.env, stdio: 'pipe' });
+      const child = spawn(cmd, args, { env: opts.env ?? process.env, stdio: 'pipe', detached: true });
       const timer =
         opts.timeoutMs === undefined
           ? undefined
           : setTimeout(() => {
               timedOut = true;
-              child.kill('SIGKILL');
+              try {
+                if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
+              } catch {
+                child.kill('SIGKILL');
+              }
+              done({ code: 124, stdout, stderr });
             }, opts.timeoutMs);
       child.stdout.setEncoding('utf8').on('data', (d: string) => (stdout += d));
       child.stderr.setEncoding('utf8').on('data', (d: string) => (stderr += d));
