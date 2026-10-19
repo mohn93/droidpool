@@ -113,7 +113,9 @@ test('buildBase clean sequence', async () => {
   const i = io();
   const rec = await buildBase(r, cfg, 'clean', 35, i);
 
-  const calls = r.calls.filter((c) => !(c.args[0] === '-version') && !c.args.includes('getprop'));
+  const calls = r.calls.filter(
+    (c) => !(c.args[0] === '-version') && !c.args.includes('getprop') && c.args[0] !== 'devices',
+  );
   const image = 'system-images;android-35;google_apis;arm64-v8a';
   assert.equal(calls[0]!.cmd, cfg.sdkmanagerBin);
   assert.deepEqual(calls[0]!.args, [image]);
@@ -125,7 +127,7 @@ test('buildBase clean sequence', async () => {
   assert.equal(calls[2]!.kind, 'spawn');
   assert.ok(!calls[2]!.args.includes('-no-snapshot-save'));
   assert.ok(calls[2]!.args.includes('-no-window'));
-  assert.deepEqual(calls[2]!.args.slice(0, 4), ['-avd', 'base-clean-35', '-port', '5620']);
+  assert.deepEqual(calls[2]!.args.slice(0, 4), ['-avd', 'base-clean-35', '-port', '5682']);
   assert.deepEqual(
     calls.slice(3, 6).map((c) => c.args.slice(-3).join(' ')),
     ['window_animation_scale 0', 'transition_animation_scale 0', 'animator_duration_scale 0'].map((x) => `global ${x}`),
@@ -257,4 +259,31 @@ test('removeBase refuses with active devices, else removes', async () => {
   assert.equal(listBases(cfg).length, 0);
   assert.ok(!fs.existsSync(path.join(cfg.avdHome, 'base-clean-35.avd')));
   await assert.rejects(removeBase(r, cfg, 'base-clean-35'), /no such base/);
+});
+
+test('buildBase uses a port outside the pool range', async () => {
+  const { cfg } = setup();
+  const r = emulatorFake('36.5.11');
+  scriptBuild(r, cfg, 'base-clean-35');
+  r.onRun((c, a) => c === cfg.adbBin && a[0] === 'devices', {
+    code: 0,
+    stdout: 'List of devices attached\nemulator-5620\tdevice\nemulator-5682\tdevice\n\n',
+    stderr: '',
+  });
+  await buildBase(r, cfg, 'clean', 35, io());
+  const spawn = r.calls.find((c) => c.kind === 'spawn')!;
+  const port = Number(spawn.args[spawn.args.indexOf('-port') + 1]);
+  assert.ok(port > cfg.portMax, String(port));
+  assert.equal(port, 5684);
+  assert.ok(r.calls.some((c) => c.args.join(' ') === '-s emulator-5684 emu kill'));
+});
+
+test('buildBase fails when every base port is taken', async () => {
+  const { cfg } = setup();
+  const r = emulatorFake('36.5.11');
+  scriptBuild(r, cfg, 'base-clean-35');
+  const listed = Array.from({ length: 10 }, (_, i) => `emulator-${5682 + 2 * i}\tdevice`).join('\n');
+  r.onRun((c, a) => c === cfg.adbBin && a[0] === 'devices', { code: 0, stdout: `List of devices attached\n${listed}\n`, stderr: '' });
+  await assert.rejects(buildBase(r, cfg, 'clean', 35, io()), { message: 'no free port for base build' });
+  assert.ok(!r.calls.some((c) => c.kind === 'spawn'));
 });

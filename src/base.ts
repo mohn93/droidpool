@@ -5,7 +5,6 @@ import { ensureDirs, type Config } from './config.ts';
 import { applyConfig, TUNED_CONFIG } from './avdfiles.ts';
 import { readState, withState, type BaseRecord, type Flavor } from './state.ts';
 import { assertDiskOk } from './disk.ts';
-import { pickPort } from './ports.ts';
 import {
   emulatorVersion,
   envFor,
@@ -43,6 +42,30 @@ function removeAvdFiles(cfg: Config, name: string): void {
   fs.rmSync(path.join(cfg.avdHome, `${name}.ini`), { force: true });
 }
 
+/** Number of even ports above the pool range that base builds may use. */
+const BASE_PORT_SPAN = 20;
+
+/**
+ * Base builds run outside the pool's port range so they never collide with a lease that a
+ * concurrent getter reserves. The first even port in [portMax+2, portMax+20] that adb does
+ * not already list is used.
+ */
+async function pickBasePort(runner: Runner, cfg: Config): Promise<number> {
+  const r = await runner.run(cfg.adbBin, ['devices'], { env: envFor(cfg), timeoutMs: 30_000 });
+  if (r.code !== 0) throw new Error(`adb devices failed: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
+  const listed = new Set(
+    r.stdout.split('\n').flatMap((line) => {
+      const m = /^emulator-(\d+)\s/.exec(line);
+      return m ? [Number(m[1])] : [];
+    }),
+  );
+  const first = cfg.portMax + 2 + (cfg.portMax % 2);
+  for (let p = first; p <= cfg.portMax + BASE_PORT_SPAN; p += 2) {
+    if (!listed.has(p)) return p;
+  }
+  throw new Error('no free port for base build');
+}
+
 export async function buildBase(
   runner: Runner,
   cfg: Config,
@@ -57,19 +80,12 @@ export async function buildBase(
   const image = imageFor(flavor, api);
   const env = envFor(cfg);
 
-  const used = await withState(
-    cfg.stateFile,
-    (s) => new Set(s.leases.map((l) => l.port)),
-  );
-  const port = pickPort(cfg, used);
-  if (port === null) throw new Error('no free emulator port for base build');
-  const serial = `emulator-${port}`;
-
   io.log(`installing system image ${image}`);
   const sdk = await runner.run(cfg.sdkmanagerBin, [image], { env, input: 'y\n', timeoutMs: 600_000 });
   if (sdk.code !== 0) throw new Error(`sdkmanager failed: ${(sdk.stderr || sdk.stdout).trim().slice(0, 300)}`);
 
   let pid: number | undefined;
+  let serial = '';
   try {
     io.log(`creating AVD ${name}`);
     const create = await runner.run(
@@ -83,6 +99,8 @@ export async function buildBase(
     const configPath = path.join(cfg.avdHome, `${name}.avd`, 'config.ini');
     fs.writeFileSync(configPath, applyConfig(fs.readFileSync(configPath, 'utf8'), TUNED_CONFIG));
 
+    const port = await pickBasePort(runner, cfg);
+    serial = `emulator-${port}`;
     io.log(`booting ${name} on ${serial}`);
     pid = launchDevice(runner, cfg, name, port, { snapshotSave: true, window: flavor === 'signed-in' });
     await waitBoot(runner, cfg, serial, pid, path.join(cfg.logsDir, `${name}.log`), cfg.bootPollMs);
