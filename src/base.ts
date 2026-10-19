@@ -125,7 +125,9 @@ export async function buildBase(
     const port = await pickBasePort(runner, cfg);
     serial = `emulator-${port}`;
     io.log(`booting ${name} on ${serial}`);
-    pid = launchDevice(runner, cfg, name, port, { snapshotSave: true, window: flavor === 'signed-in' });
+    // Same snapshot flags as devices: the explicit save below is the only write. Letting the
+    // emulator also save on exit races killDevice and can truncate ram.bin.
+    pid = launchDevice(runner, cfg, name, port, { window: flavor === 'signed-in' });
     liveBuild = { pid, name };
     await waitBoot(runner, cfg, serial, pid, path.join(cfg.logsDir, `${name}.log`), cfg.bootPollMs);
     io.log(`settling for ${Math.round(cfg.baseSettleMs / 1000)}s`);

@@ -134,7 +134,9 @@ test('buildBase clean sequence', async () => {
   assert.equal(calls[1]!.input, 'no\n');
   assert.equal(calls[1]!.env!.ANDROID_AVD_HOME, cfg.avdHome);
   assert.equal(calls[2]!.kind, 'spawn');
-  assert.ok(!calls[2]!.args.includes('-no-snapshot-save'));
+  // The explicit save must be the only write: an exit-time quickboot save races the kill
+  // and can leave a truncated ram.bin.
+  assert.ok(calls[2]!.args.includes('-no-snapshot-save'));
   assert.ok(calls[2]!.args.includes('-no-window'));
   assert.deepEqual(calls[2]!.args.slice(0, 4), ['-avd', 'base-clean-35', '-port', '5682']);
   assert.deepEqual(
@@ -183,6 +185,7 @@ test('buildBase signed-in waits for user', async () => {
   assert.deepEqual(order, ['wait', 'snapshot']);
   const spawn = r.calls.find((c) => c.kind === 'spawn')!;
   assert.ok(!spawn.args.includes('-no-window'));
+  assert.ok(spawn.args.includes('-no-snapshot-save'));
   assert.ok(r.calls.some((c) => c.args.includes('system-images;android-35;google_apis_playstore;arm64-v8a')));
 });
 
