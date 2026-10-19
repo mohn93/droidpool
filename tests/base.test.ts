@@ -25,10 +25,21 @@ function setup() {
     baseSettleMs: 0,
     bootPollMs: 1,
     killWaitMs: 50,
+    freeBytesFn: () => 100 * 2 ** 30,
   };
   fs.mkdirSync(cfg.avdHome, { recursive: true });
   return { tmp, cfg };
 }
+
+test('buildBase checks free disk through cfg.freeBytesFn', async () => {
+  const { cfg } = setup();
+  const r = new FakeRunner();
+  await assert.rejects(
+    buildBase(r, { ...cfg, freeBytesFn: () => 2 ** 30 }, 'clean', 35, { waitForUser: async () => {}, log: () => {} }),
+    /not enough disk: 1\.0 GB free/,
+  );
+  assert.equal(r.calls.length, 0);
+});
 
 function emulatorFake(version: string): FakeRunner {
   return new FakeRunner().onRun(

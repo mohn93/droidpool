@@ -98,7 +98,7 @@ export async function buildBase(
 ): Promise<BaseRecord> {
   assertApiSupported(cfg, api);
   ensureDirs(cfg);
-  assertDiskOk(cfg);
+  assertDiskOk(cfg, cfg.freeBytesFn(cfg.home));
   const name = baseName(flavor, api);
   const image = imageFor(flavor, api);
   const env = envFor(cfg);
