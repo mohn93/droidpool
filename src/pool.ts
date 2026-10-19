@@ -184,8 +184,15 @@ export async function getDevice(
     });
   } catch (e) {
     try {
-      await teardown(runner, cfg, { ...lease, emulatorPid: pid });
-      await dropLeases(cfg, [id]);
+      const stillLeased = await withState(cfg.stateFile, (s) => s.leases.some((l) => l.deviceId === id));
+      if (stillLeased) {
+        await teardown(runner, cfg, { ...lease, emulatorPid: pid });
+        await dropLeases(cfg, [id]);
+      } else {
+        // Our lease was reaped, so its serial may already belong to another device: never `emu kill` it.
+        if (pidAlive(runner, pid)) runner.kill(pid, 'SIGKILL');
+        removeDeviceFiles(cfg, id);
+      }
     } catch {
       // best effort; reap retries, and the original error matters more
     }
@@ -207,7 +214,12 @@ export async function releaseDevice(
   cfg: Config,
   serial: string,
 ): Promise<{ released: boolean; message: string }> {
-  const l = readState(cfg.stateFile).leases.find((x) => x.serial === serial);
+  const l = await withState(cfg.stateFile, (s) => {
+    const found = s.leases.find((x) => x.serial === serial);
+    // A booting lease's emulator pid is not recorded yet; its getter owns the cleanup.
+    if (found?.state === 'booting') throw new Error(`device ${serial} is still booting`);
+    return found && { ...found };
+  });
   if (!l) return { released: false, message: `no device ${serial}` };
   await teardown(runner, cfg, l);
   await dropLeases(cfg, [l.deviceId]);

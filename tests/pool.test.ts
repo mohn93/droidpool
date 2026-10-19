@@ -564,3 +564,42 @@ test('reap continues past a failing teardown', async () => {
   assert.ok(!fs.existsSync(devDir(cfg, 'dev-bbbbbb')));
   assert.match(err.text(), /^droidpool: reap: dev-aaaaaa/m);
 });
+
+test('release refuses a booting device', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg);
+  r.alive.add(7001);
+  await seed(cfg, lease({ state: 'booting' }));
+  await assert.rejects(releaseDevice(r, cfg, 'emulator-5620'), {
+    message: 'device emulator-5620 is still booting',
+  });
+  assert.equal(readState(cfg.stateFile).leases.length, 1);
+  assert.ok(fs.existsSync(devDir(cfg, 'dev-aaaaaa')));
+  assert.ok(!r.calls.some((c) => c.args.includes('kill')));
+  assert.ok(r.isAlive(7001));
+});
+
+test('getter failure after its lease vanished kills by pid only', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg).onSpawn(5001);
+  r.alive.add(7009);
+  // While booting, a reaper drops the lease and another getter takes the same serial.
+  const other = lease({ deviceId: 'dev-999999', emulatorPid: 7009 });
+  r.onRun(
+    (c, a) => c === cfg.adbBin && a.includes('getprop'),
+    () => {
+      const st = readState(cfg.stateFile);
+      st.leases = [other];
+      fs.writeFileSync(cfg.stateFile, JSON.stringify(st));
+      return { code: 0, stdout: '1\n', stderr: '' };
+    },
+  );
+  await assert.rejects(
+    getDevice(r, cfg, { flavor: 'clean', project: '/p', owner: cli() }),
+    /was released while booting/,
+  );
+  assert.ok(!r.calls.some((c) => c.args.join(' ') === '-s emulator-5620 emu kill'));
+  assert.deepEqual(r.killed, [{ pid: 5001, signal: 'SIGKILL' }]);
+  assert.ok(r.isAlive(7009));
+  assert.deepEqual(readState(cfg.stateFile).leases.map((l) => l.deviceId), ['dev-999999']);
+});
