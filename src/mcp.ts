@@ -90,6 +90,7 @@ export async function markGone(deps: McpDeps): Promise<number> {
     for (const l of s.leases) {
       if (l.owner.kind === 'mcp' && l.owner.pid === pid) {
         l.owner.goneSince = now;
+        l.owner.exited = true;
         n++;
       }
     }
@@ -129,6 +130,7 @@ async function main(): Promise<void> {
   const stop = (): void => {
     if (closing) return;
     closing = true;
+    clearInterval(timer);
     markGone(deps)
       .then((n) => {
         if (n > 0) scheduleReaper(realRunner, cfg);

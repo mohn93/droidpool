@@ -14,7 +14,7 @@ export interface BaseRecord {
 }
 
 export type Owner =
-  | { kind: 'mcp'; pid: number; goneSince?: number }
+  | { kind: 'mcp'; pid: number; goneSince?: number; exited?: true }
   | { kind: 'cli'; expiresAt: number };
 
 export interface Lease {

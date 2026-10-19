@@ -256,7 +256,9 @@ function shouldReap(runner: Runner, cfg: Config, l: Lease, now: number): boolean
   const o = l.owner;
   if (o.kind === 'cli') {
     if (o.expiresAt <= now) return true;
-  } else if (runner.isAlive(o.pid)) {
+  } else if (!o.exited && runner.isAlive(o.pid)) {
+    // An owner marked exited by its own clean shutdown keeps its mark even while the pid
+    // lingers (or is reused), so the delayed gc can still reap it after the grace period.
     delete o.goneSince;
   } else if (o.goneSince === undefined) {
     o.goneSince = now;

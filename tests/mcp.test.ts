@@ -9,6 +9,7 @@ import { loadConfig, type Config } from '../src/config.ts';
 import { FakeRunner } from './fakes.ts';
 import { readState, withState, type BaseRecord, type Lease } from '../src/state.ts';
 import { createServer, markGone, scheduleReaper } from '../src/mcp.ts';
+import { reap } from '../src/pool.ts';
 
 const VERSION = '36.5.11';
 const PID = 4242;
@@ -199,4 +200,41 @@ test('clean exit marks own leases gone and keeps others', async () => {
   assert.match(script, / gc$/);
   assert.equal(sp.logFile, path.join(cfg.logsDir, 'reaper.log'));
   assert.equal(sp.env, process.env);
+});
+
+test('reap racing a clean exit keeps the exit mark while the owner pid is alive', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg);
+  r.alive.add(PID);
+  r.alive.add(7000);
+  const lease: Lease = {
+    deviceId: 'dev-aaaaa0',
+    serial: 'emulator-5620',
+    port: 5620,
+    emulatorPid: 7000,
+    flavor: 'clean',
+    api: 35,
+    project: '/p',
+    owner: { kind: 'mcp', pid: PID },
+    createdAt: Date.now(),
+    state: 'ready',
+  };
+  await withState(cfg.stateFile, (s) => {
+    s.leases.push(lease);
+  });
+  fs.mkdirSync(path.join(cfg.avdHome, 'dev-aaaaa0.avd'));
+  assert.equal(await markGone({ runner: r, cfg, pid: PID }), 1);
+  const marked = readState(cfg.stateFile).leases[0]!.owner;
+  assert.ok(marked.kind === 'mcp' && marked.goneSince !== undefined);
+  const gone = marked.goneSince;
+
+  // The exiting server's pid is still alive while a queued reap runs.
+  assert.deepEqual(await reap(r, cfg, gone + 1000), []);
+  const after = readState(cfg.stateFile).leases[0]!.owner;
+  assert.ok(after.kind === 'mcp' && after.goneSince === gone);
+
+  // The delayed gc after the grace period removes it.
+  assert.deepEqual(await reap(r, cfg, gone + cfg.ownerGraceMs + 1), ['dev-aaaaa0']);
+  assert.equal(readState(cfg.stateFile).leases.length, 0);
+  assert.ok(!fs.existsSync(path.join(cfg.avdHome, 'dev-aaaaa0.avd')));
 });
