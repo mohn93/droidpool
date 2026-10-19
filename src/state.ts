@@ -91,24 +91,46 @@ function lockIsStale(lockDir: string): boolean {
   return pid !== undefined && !pidAlive(pid);
 }
 
+const BREAK_STALE_MS = 5_000;
+
+// Breaking is serialized by a second mkdir mutex so a slow breaker cannot
+// rename away a lock that someone else acquired after the first break.
 function breakLock(lockDir: string): void {
-  // Rename first so only one breaker wins; then delete the renamed directory.
-  const grave = `${lockDir}.${process.pid}.${Date.now()}.stale`;
+  const mutex = `${lockDir}.break`;
   try {
-    fs.renameSync(lockDir, grave);
-  } catch {
+    fs.mkdirSync(mutex);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+    try {
+      if (Date.now() - fs.statSync(mutex).mtimeMs > BREAK_STALE_MS) {
+        fs.rmSync(mutex, { recursive: true, force: true });
+      }
+    } catch {
+      // vanished; caller retries
+    }
     return;
   }
-  fs.rmSync(grave, { recursive: true, force: true });
+  try {
+    if (!lockIsStale(lockDir)) return;
+    const grave = `${lockDir}.${process.pid}.${Date.now()}.stale`;
+    try {
+      fs.renameSync(lockDir, grave);
+    } catch {
+      return;
+    }
+    fs.rmSync(grave, { recursive: true, force: true });
+  } finally {
+    fs.rmSync(mutex, { recursive: true, force: true });
+  }
 }
 
-async function acquire(lockDir: string): Promise<void> {
+async function acquire(lockDir: string): Promise<number> {
   fs.mkdirSync(path.dirname(lockDir), { recursive: true });
   for (;;) {
     try {
       fs.mkdirSync(lockDir);
       fs.writeFileSync(path.join(lockDir, 'owner'), String(process.pid));
-      return;
+      return fs.statSync(lockDir).ino;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
     }
@@ -120,18 +142,34 @@ async function acquire(lockDir: string): Promise<void> {
   }
 }
 
+function holdsLock(lockDir: string, ino: number): boolean {
+  try {
+    return fs.statSync(lockDir).ino === ino && readOwner(lockDir) === process.pid;
+  } catch {
+    return false;
+  }
+}
+
+/** Do not nest withState calls, and keep fn well under 30 s (the lock is breakable after that). */
 export async function withState<T>(
   stateFile: string,
   fn: (s: State) => T | Promise<T>,
 ): Promise<T> {
   const lockDir = `${stateFile}.lock`;
-  await acquire(lockDir);
+  const ino = await acquire(lockDir);
+  let lost = false;
   try {
     const s = readState(stateFile);
     const result = await fn(s);
+    if (!holdsLock(lockDir, ino)) {
+      lost = true;
+      throw new Error('state lock lost while held');
+    }
     writeStateAtomic(stateFile, s);
     return result;
   } finally {
-    fs.rmSync(lockDir, { recursive: true, force: true });
+    if (!lost && holdsLock(lockDir, ino)) {
+      fs.rmSync(lockDir, { recursive: true, force: true });
+    }
   }
 }

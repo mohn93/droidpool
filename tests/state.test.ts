@@ -56,9 +56,7 @@ test('lock is released when fn throws', async () => {
   assert.equal(fs.existsSync(file + '.lock'), false);
 });
 
-test('concurrent writers serialize', async () => {
-  const dir = tmpDir();
-  const file = path.join(dir, 'state.json');
+async function runEightWriters(file: string): Promise<void> {
   const stateUrl = pathToFileURL(path.resolve('src/state.ts')).href;
   const script = `
     import { withState } from ${JSON.stringify(stateUrl)};
@@ -87,6 +85,37 @@ test('concurrent writers serialize', async () => {
   const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
   assert.equal(parsed.leases[0].port, 200);
   assert.equal(readState(file).leases[0].port, 200);
+}
+
+test('concurrent writers serialize', async () => {
+  await runEightWriters(path.join(tmpDir(), 'state.json'));
+});
+
+test('concurrent breakers of a dead lock serialize', async () => {
+  const file = path.join(tmpDir(), 'state.json');
+  fs.mkdirSync(file + '.lock');
+  fs.writeFileSync(path.join(file + '.lock', 'owner'), '999999');
+  await runEightWriters(file);
+});
+
+test('release does not delete a lock it no longer owns', async () => {
+  const file = path.join(tmpDir(), 'state.json');
+  await withState(file, (s) => {
+    s.leases.push(lease(5624));
+  });
+  const before = fs.readFileSync(file, 'utf8');
+  await assert.rejects(
+    withState(file, (s) => {
+      s.leases.push(lease(5626));
+      fs.rmSync(file + '.lock', { recursive: true });
+      fs.mkdirSync(file + '.lock');
+      fs.writeFileSync(path.join(file + '.lock', 'owner'), '1');
+    }),
+    /state lock lost/,
+  );
+  assert.equal(fs.existsSync(file + '.lock'), true);
+  assert.equal(fs.readFileSync(path.join(file + '.lock', 'owner'), 'utf8'), '1');
+  assert.equal(fs.readFileSync(file, 'utf8'), before);
 });
 
 test('stale lock is broken', async () => {
