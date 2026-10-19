@@ -5,6 +5,7 @@ export interface FakeCall {
   cmd: string;
   args: string[];
   env?: NodeJS.ProcessEnv;
+  input?: string;
   logFile?: string;
 }
 
@@ -36,7 +37,7 @@ export class FakeRunner implements Runner {
     args: string[],
     opts: { env?: NodeJS.ProcessEnv; timeoutMs?: number; input?: string } = {},
   ): Promise<RunResult> {
-    this.calls.push({ kind: 'run', cmd, args, env: opts.env });
+    this.calls.push({ kind: 'run', cmd, args, env: opts.env, input: opts.input });
     for (let i = this.scripts.length - 1; i >= 0; i--) {
       const s = this.scripts[i]!;
       if (s.match(cmd, args)) return typeof s.result === 'function' ? s.result() : s.result;

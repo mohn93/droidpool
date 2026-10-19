@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { Runner } from './exec.ts';
 import type { Config } from './config.ts';
 
-function envFor(cfg: Config): NodeJS.ProcessEnv {
+export function envFor(cfg: Config): NodeJS.ProcessEnv {
   return { ...process.env, ANDROID_AVD_HOME: cfg.avdHome, ANDROID_SDK_ROOT: cfg.sdkRoot };
 }
 

@@ -19,6 +19,8 @@ test('loadConfig defaults', () => {
   assert.equal(c.queueWaitMs, 90000);
   assert.equal(c.bootTimeoutMs, 180000);
   assert.equal(c.killWaitMs, 15000);
+  assert.equal(c.baseSettleMs, 30000);
+  assert.equal(c.bootPollMs, 500);
   assert.equal(c.portMin, 5620);
   assert.equal(c.portMax, 5680);
   assert.equal(c.dataPartitionBytes, 6 * 2 ** 30);

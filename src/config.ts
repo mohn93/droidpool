@@ -20,6 +20,8 @@ export interface Config {
   queueWaitMs: number;
   bootTimeoutMs: number;
   killWaitMs: number;
+  baseSettleMs: number;
+  bootPollMs: number;
   portMin: number;
   portMax: number;
   supportedApis: number[];
@@ -48,6 +50,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     queueWaitMs: 90_000,
     bootTimeoutMs: 180_000,
     killWaitMs: 15_000,
+    baseSettleMs: 30_000,
+    bootPollMs: 500,
     portMin: 5620,
     portMax: 5680,
     supportedApis: [35],
