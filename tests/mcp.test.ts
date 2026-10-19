@@ -8,8 +8,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { loadConfig, type Config } from '../src/config.ts';
 import { FakeRunner } from './fakes.ts';
 import { readState, withState, type BaseRecord, type Lease } from '../src/state.ts';
-import { deviceIni } from '../src/avdfiles.ts';
-import { createServer, shutdown } from '../src/mcp.ts';
+import { createServer, markGone, scheduleReaper } from '../src/mcp.ts';
 
 const VERSION = '36.5.11';
 const PID = 4242;
@@ -148,7 +147,7 @@ test('mcp release_device refuses another live session\'s device', async () => {
   await close();
 });
 
-test('shutdown releases owned devices only', async () => {
+test('clean exit marks own leases gone and keeps others', async () => {
   const { cfg } = setup();
   const r = fakeRunner(cfg);
   r.alive.add(OTHER_PID);
@@ -164,16 +163,40 @@ test('shutdown releases owned devices only', async () => {
     createdAt: Date.now(),
     state: 'ready',
   });
-  const leases = [mk(0, { kind: 'mcp', pid: PID }), mk(1, { kind: 'mcp', pid: OTHER_PID })];
+  const cliOwner = { kind: 'cli' as const, expiresAt: Date.now() + 60_000 };
+  const leases = [
+    mk(0, { kind: 'mcp', pid: PID }),
+    mk(1, { kind: 'mcp', pid: OTHER_PID }),
+    mk(2, cliOwner),
+    mk(3, { kind: 'mcp', pid: PID }),
+  ];
   await withState(cfg.stateFile, (s) => {
     s.leases.push(...leases);
   });
-  for (const l of leases) {
-    const dir = path.join(cfg.avdHome, `${l.deviceId}.avd`);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(cfg.avdHome, `${l.deviceId}.ini`), deviceIni(dir, 35));
-  }
-  await shutdown({ runner: r, cfg, pid: PID });
+  const t0 = Date.now();
+  assert.equal(await markGone({ runner: r, cfg, pid: PID }), 2);
   const left = readState(cfg.stateFile).leases;
-  assert.deepEqual(left.map((l) => l.deviceId), ['dev-aaaaa1']);
+  assert.deepEqual(left.map((l) => l.deviceId), ['dev-aaaaa0', 'dev-aaaaa1', 'dev-aaaaa2', 'dev-aaaaa3']);
+  for (const i of [0, 3]) {
+    const o = left[i]!.owner;
+    assert.ok(o.kind === 'mcp' && o.goneSince !== undefined && o.goneSince >= t0 && o.goneSince <= Date.now());
+  }
+  assert.deepEqual(left[1]!.owner, { kind: 'mcp', pid: OTHER_PID });
+  assert.deepEqual(left[2]!.owner, cliOwner);
+  assert.ok(!r.calls.some((c) => c.args.includes('kill')));
+
+  scheduleReaper(r, cfg);
+  const spawns = r.calls.filter((c) => c.kind === 'spawn');
+  assert.equal(spawns.length, 1);
+  const sp = spawns[0]!;
+  assert.equal(sp.cmd, 'sh');
+  assert.equal(sp.args[0], '-c');
+  const script = sp.args[1]!;
+  assert.match(script, /^sleep 125; exec /); // ceil(120 s grace) + 5
+  assert.ok(script.includes(process.execPath));
+  assert.ok(script.includes('--disable-warning=ExperimentalWarning'));
+  assert.ok(script.includes(path.resolve(import.meta.dirname, '..', 'src', 'cli.ts')));
+  assert.match(script, / gc$/);
+  assert.equal(sp.logFile, path.join(cfg.logsDir, 'reaper.log'));
+  assert.equal(sp.env, process.env);
 });

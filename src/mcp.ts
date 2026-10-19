@@ -1,12 +1,14 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 import fs from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { ensureDirs, loadConfig, type Config } from './config.ts';
 import { realRunner, type Runner } from './exec.ts';
 import { getDevice, listDevices, reap, releaseDevice } from './pool.ts';
+import { withState } from './state.ts';
 
 export interface McpDeps {
   runner: Runner;
@@ -75,17 +77,37 @@ export function createServer(deps: McpDeps): McpServer {
   return server;
 }
 
-/** Releases every lease owned by this MCP process; errors are logged and skipped. */
-export async function shutdown(deps: McpDeps): Promise<void> {
-  const { runner, cfg, pid } = deps;
-  const mine = listDevices(cfg).filter((d) => d.owner.kind === 'mcp' && d.owner.pid === pid);
-  for (const d of mine) {
-    try {
-      await releaseDevice(runner, cfg, d.serial);
-    } catch (e) {
-      process.stderr.write(`droidpool-mcp: release ${d.serial} failed: ${e instanceof Error ? e.message : e}\n`);
+/**
+ * On a clean exit, devices are kept for the owner grace period so a reconnecting session can
+ * reclaim them with reuse_serial. Marks every lease owned by this process as gone now, so the
+ * grace clock starts at exit rather than at the next reap. Returns how many were marked.
+ */
+export async function markGone(deps: McpDeps): Promise<number> {
+  const { cfg, pid } = deps;
+  const now = Date.now();
+  return withState(cfg.stateFile, (s) => {
+    let n = 0;
+    for (const l of s.leases) {
+      if (l.owner.kind === 'mcp' && l.owner.pid === pid) {
+        l.owner.goneSince = now;
+        n++;
+      }
     }
-  }
+    return n;
+  });
+}
+
+const CLI_PATH = fileURLToPath(new URL('./cli.ts', import.meta.url));
+const shq = (v: string) => `'${v.replaceAll("'", `'\\''`)}'`;
+
+/**
+ * Spawns a detached `droidpool gc` that runs just after the owner grace period, so devices
+ * left by an exited session are reaped even if no other droidpool command runs.
+ */
+export function scheduleReaper(runner: Runner, cfg: Config): void {
+  const sleepS = Math.ceil(cfg.ownerGraceMs / 1000) + 5;
+  const script = `sleep ${sleepS}; exec ${shq(process.execPath)} --disable-warning=ExperimentalWarning ${shq(CLI_PATH)} gc`;
+  runner.spawnDetached('sh', ['-c', script], { env: process.env, logFile: path.join(cfg.logsDir, 'reaper.log') });
 }
 
 const REAP_INTERVAL_MS = 30_000;
@@ -107,8 +129,11 @@ async function main(): Promise<void> {
   const stop = (): void => {
     if (closing) return;
     closing = true;
-    shutdown(deps)
-      .catch((e) => process.stderr.write(`droidpool-mcp: shutdown failed: ${e instanceof Error ? e.message : e}\n`))
+    markGone(deps)
+      .then((n) => {
+        if (n > 0) scheduleReaper(realRunner, cfg);
+      })
+      .catch((e) => process.stderr.write(`droidpool-mcp: exit cleanup failed: ${e instanceof Error ? e.message : e}\n`))
       .finally(() => process.exit(0));
   };
   process.stdin.on('end', stop);

@@ -44,7 +44,7 @@ droidpool gc                  # reap expired leases, dead emulators, orphan clon
 droidpool doctor              # bases, devices, free disk, emulator version mismatches
 ```
 
-CLI leases expire after 2 hours unless renewed. Devices taken through the MCP server are released when that server process exits (2 minute grace).
+CLI leases expire after 2 hours unless renewed. Devices taken through the MCP server survive for 2 minutes after that server process exits, so a reconnecting session can reclaim them with `reuse_serial`. After that they are reaped.
 
 ## MCP tools
 
