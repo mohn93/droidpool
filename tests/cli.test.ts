@@ -172,7 +172,7 @@ test('doctor', async () => {
     'emulator: 36.5.11',
     'bases: 1',
     'devices: 0',
-    'free disk: 100.0 GB (need 9.2 GB per device)',
+    'free disk: 100.0 GB (need 9.2 GB to add a device: 7.2 GB per device plus margin)',
     'bases on disk: 1.4G',
   ]);
 });
@@ -238,4 +238,22 @@ test('show opens a mirror window for a device', async () => {
   assert.match(r.out, /^showing emulator-5620 in a window titled "emulator-5620 \(shop\)"\n$/);
   assert.ok(fr.calls.some((c) => c.kind === 'spawn' && c.cmd === bin));
   assert.equal((await run(cfg, fr, ['show'])).code, 2);
+});
+
+test('release needs --force for a live mcp session\'s device', async () => {
+  const { cfg } = setup();
+  const fr = fakeRunner(cfg);
+  fr.alive.add(7001).add(7777);
+  await withState(cfg.stateFile, (s) => {
+    s.leases.push({
+      deviceId: 'dev-aaaaaa', serial: 'emulator-5620', port: 5620, emulatorPid: 7001, flavor: 'clean', api: 35,
+      project: '/p', owner: { kind: 'mcp', pid: 7777 }, createdAt: Date.now(), state: 'ready',
+    });
+  });
+  const refused = await run(cfg, fr, ['release', 'emulator-5620']);
+  assert.equal(refused.code, 1);
+  assert.match(refused.err, /belongs to a live MCP session \(pid 7777\); pass --force/);
+  const forced = await run(cfg, fr, ['release', '--force', 'emulator-5620']);
+  assert.equal(forced.code, 0);
+  assert.match(forced.out, /^released emulator-5620/);
 });

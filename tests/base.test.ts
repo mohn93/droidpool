@@ -12,7 +12,7 @@ import {
   assertBaseUsable,
   buildBase,
   baseName,
-  currentBuildPid,
+  buildInProgress,
   imageFor,
   listBases,
   removeBase,
@@ -112,6 +112,12 @@ test('assertBaseUsable version mismatch', async () => {
   await withState(cfg.stateFile, (s) => {
     s.bases.push(rec);
   });
+  await assert.rejects(assertBaseUsable(emulatorFake('36.5.11'), cfg, 'clean', 35), {
+    message: 'base base-clean-35 has no snapshot on disk. Rebuild: droidpool base build clean --api 35',
+  });
+  const snap = path.join(cfg.avdHome, 'base-clean-35.avd', 'snapshots', 'default_boot');
+  fs.mkdirSync(snap, { recursive: true });
+  fs.writeFileSync(path.join(snap, 'hardware.ini'), '');
   await assert.rejects(assertBaseUsable(emulatorFake('36.6.11'), cfg, 'clean', 35), {
     message:
       'base base-clean-35 was built on emulator 36.5.11; emulator is now 36.6.11. Rebuild: droidpool base build clean --api 35',
@@ -311,23 +317,74 @@ test('buildBase fails when every base port is taken', async () => {
   assert.ok(!r.calls.some((c) => c.kind === 'spawn'));
 });
 
-test('currentBuildPid is set during boot and cleared after', async () => {
+test('a build is recorded in state while it runs and cleared after', async () => {
   for (const snapshotOk of [true, false]) {
     const { cfg } = setup();
     const r = emulatorFake('36.5.11');
     scriptBuild(r, cfg, 'base-clean-35', snapshotOk);
-    const seen: (number | undefined)[] = [];
+    const seen: { inProgress: boolean; builds: string[] }[] = [];
     r.onRun((c, a) => c === cfg.adbBin && a.includes('getprop'), () => {
-      seen.push(currentBuildPid());
+      seen.push({ inProgress: buildInProgress(), builds: readState(cfg.stateFile).builds.map((b) => b.name) });
       return { code: 0, stdout: '1\n', stderr: '' };
     });
-    assert.equal(currentBuildPid(), undefined);
+    assert.equal(buildInProgress(), false);
     const build = buildBase(r, cfg, 'clean', 35, io());
     if (snapshotOk) await build;
     else await assert.rejects(build, /snapshot save failed/);
-    assert.deepEqual(seen, [4242]);
-    assert.equal(currentBuildPid(), undefined);
+    assert.deepEqual(seen, [{ inProgress: true, builds: ['base-clean-35'] }]);
+    assert.equal(buildInProgress(), false);
+    assert.deepEqual(readState(cfg.stateFile).builds, []);
   }
+});
+
+test('getters and a second build refuse a base while it is being built', async () => {
+  const { cfg } = setup();
+  const r = emulatorFake('36.5.11');
+  scriptBuild(r, cfg, 'base-clean-35');
+  await buildBase(r, cfg, 'clean', 35, io());
+  const errors: string[] = [];
+  r.onRun((c, a) => c === cfg.adbBin && a.includes('getprop'), () => {
+    return { code: 0, stdout: '1\n', stderr: '' };
+  });
+  r.onRun((c) => c === cfg.sdkmanagerBin, () => {
+    // Runs inside the second build, after it claimed the base.
+    void assertBaseUsable(r, cfg, 'clean', 35).catch((e: Error) => errors.push(e.message));
+    return { code: 0, stdout: '', stderr: '' };
+  });
+  const second = buildBase(r, cfg, 'clean', 35, io());
+  await assert.rejects(buildBase(r, cfg, 'clean', 35, io()), /base base-clean-35 is already being built/);
+  await second;
+  await new Promise((res) => setImmediate(res));
+  assert.equal(errors.length, 1);
+  assert.match(errors[0]!, /base base-clean-35 is being rebuilt/);
+});
+
+test('buildBase refuses while devices are cloned from the base', async () => {
+  const { cfg } = setup();
+  const r = emulatorFake('36.5.11');
+  scriptBuild(r, cfg, 'base-clean-35');
+  await withState(cfg.stateFile, (s) => {
+    s.leases.push({
+      deviceId: 'dev-aaaaaa', serial: 'emulator-5620', port: 5620, emulatorPid: 1, flavor: 'clean', api: 35,
+      project: 'p', owner: { kind: 'cli', expiresAt: Date.now() + 60_000 }, createdAt: 1, state: 'ready',
+    });
+  });
+  await assert.rejects(buildBase(r, cfg, 'clean', 35, io()), {
+    message: 'base base-clean-35 has 1 active devices; release them before rebuilding',
+  });
+  assert.equal(r.calls.length, 0);
+});
+
+test('a failed system image install keeps the previous base', async () => {
+  const { cfg } = setup();
+  const r = emulatorFake('36.5.11');
+  scriptBuild(r, cfg, 'base-clean-35');
+  await buildBase(r, cfg, 'clean', 35, io());
+  r.onRun((c) => c === cfg.sdkmanagerBin, { code: 1, stdout: '', stderr: 'network down' });
+  await assert.rejects(buildBase(r, cfg, 'clean', 35, io()), /sdkmanager failed: network down/);
+  assert.equal(listBases(cfg).length, 1);
+  assert.ok(fs.existsSync(path.join(cfg.avdHome, 'base-clean-35.avd')));
+  assert.deepEqual(readState(cfg.stateFile).builds, []);
 });
 
 test('abortCurrentBuild kills the base emulator and removes its files', async () => {
@@ -339,8 +396,8 @@ test('abortCurrentBuild kills the base emulator and removes its files', async ()
     return { code: 1, stdout: '', stderr: 'offline' };
   });
   await assert.rejects(buildBase(r, cfg, 'clean', 35, io()), /emulator exited/);
-  assert.deepEqual(r.killed[0], { pid: 4242, signal: 'SIGKILL' });
-  assert.equal(currentBuildPid(), undefined);
+  assert.deepEqual(r.killed[0], { pid: 4242, signal: 'SIGKILL', group: true });
+  assert.equal(buildInProgress(), false);
   assert.ok(!fs.existsSync(path.join(cfg.avdHome, 'base-clean-35.avd')));
   abortCurrentBuild(r, cfg); // no build running: no-op
   assert.equal(r.killed.length, 1);

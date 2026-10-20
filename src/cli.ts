@@ -4,9 +4,9 @@ import fs from 'node:fs';
 import readline from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { ensureDirs, loadConfig, type Config } from './config.ts';
-import { realRunner, type Runner } from './exec.ts';
-import { abortCurrentBuild, buildBase, currentBuildPid, listBases, removeBase } from './base.ts';
-import { getDevice, listDevices, releaseDevice, renewLease, reap } from './pool.ts';
+import { killRunChildren, realRunner, type Runner } from './exec.ts';
+import { abortCurrentBuild, buildBase, listBases, removeBase } from './base.ts';
+import { abortCurrentGets, getDevice, listDevices, releaseDevice, renewLease, reap } from './pool.ts';
 import { doctorReport } from './doctor.ts';
 import { showDevice } from './viewer.ts';
 import type { Flavor } from './state.ts';
@@ -24,7 +24,7 @@ const USAGE = `usage: droidpool <command> ...
   base list
   base rm <name>
   get [--clean|--signed-in] [--api N] [--project P]
-  release <serial>
+  release <serial> [--force]
   renew <serial>
   show <serial>
   ls
@@ -105,9 +105,9 @@ async function dispatch(argv: string[], deps: CliDeps, reaped: string[]): Promis
       return;
     }
     case 'release': {
-      const { positionals } = parseArgs({ ...opts, args: rest });
+      const { values, positionals } = parseArgs({ ...opts, args: rest, options: { force: { type: 'boolean' } } });
       if (positionals.length !== 1) throw new UsageError('release needs a serial');
-      const r = await releaseDevice(runner, cfg, positionals[0]!);
+      const r = await releaseDevice(runner, cfg, positionals[0]!, { force: values.force === true });
       if (!r.released) throw new Error(r.message);
       out(r.message + '\n');
       return;
@@ -196,12 +196,18 @@ function isMain(): boolean {
 
 if (isMain()) {
   const cfg = loadConfig();
-  process.on('SIGINT', () => {
-    process.stderr.write('droidpool: interrupted\n');
-    // A base build's emulator is detached, so it would outlive us without this.
-    if (currentBuildPid() !== undefined) abortCurrentBuild(realRunner, cfg);
-    process.exit(130);
-  });
+  const codes: Partial<Record<NodeJS.Signals, number>> = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 };
+  for (const [sig, code] of Object.entries(codes) as [NodeJS.Signals, number][]) {
+    process.on(sig, () => {
+      process.stderr.write(`droidpool: interrupted (${sig})\n`);
+      // Emulators and sdkmanager run detached in their own process groups, so they would
+      // outlive us without this.
+      killRunChildren();
+      abortCurrentBuild(realRunner, cfg);
+      abortCurrentGets(realRunner, cfg);
+      process.exit(code);
+    });
+  }
   const code = await runCli(process.argv.slice(2), {
     runner: realRunner,
     cfg,

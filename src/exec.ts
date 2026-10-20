@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 
 export interface RunResult {
@@ -19,7 +19,42 @@ export interface Runner {
     opts: { env?: NodeJS.ProcessEnv; logFile: string },
   ): number;
   isAlive(pid: number): boolean;
-  kill(pid: number, signal?: NodeJS.Signals): void;
+  /** The process start time as `ps` reports it, or undefined when there is no such process. */
+  startTime(pid: number): string | undefined;
+  /** With group, signals the whole process group led by pid (detached children lead their own). */
+  kill(pid: number, signal?: NodeJS.Signals, opts?: { group?: boolean }): void;
+}
+
+/**
+ * True when pid is alive and, if a start time was recorded with it, is still the same process.
+ * Pids are reused, so a pid alone can name an unrelated process hours later.
+ */
+export function procAlive(runner: Runner, pid: number, start?: string): boolean {
+  if (pid <= 0 || !runner.isAlive(pid)) return false;
+  return start === undefined || runner.startTime(pid) === start;
+}
+
+/**
+ * Getters and base builders are always processes on this machine, so they are checked with the
+ * real process table even when a test runner stands in for the emulator side.
+ */
+export function localProcAlive(p: { pid: number; start?: string }): boolean {
+  return procAlive(realRunner, p.pid, p.start);
+}
+
+/** Process groups of run() children still running, so a signal handler can stop them. */
+const liveRunGroups = new Set<number>();
+
+/** Synchronous best effort for signal handlers: SIGKILL every run() child still running. */
+export function killRunChildren(): void {
+  for (const pid of liveRunGroups) {
+    try {
+      process.kill(-pid, 'SIGKILL');
+    } catch {
+      // already gone
+    }
+  }
+  liveRunGroups.clear();
 }
 
 export const realRunner: Runner = {
@@ -33,9 +68,11 @@ export const realRunner: Runner = {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        if (child.pid !== undefined) liveRunGroups.delete(child.pid);
         resolve(r);
       };
       const child = spawn(cmd, args, { env: opts.env ?? process.env, stdio: 'pipe', detached: true });
+      if (child.pid !== undefined) liveRunGroups.add(child.pid);
       const timer =
         opts.timeoutMs === undefined
           ? undefined
@@ -83,7 +120,27 @@ export const realRunner: Runner = {
     }
   },
 
-  kill(pid, signal = 'SIGTERM') {
+  startTime(pid) {
+    try {
+      const out = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+      return out || undefined;
+    } catch {
+      return undefined;
+    }
+  },
+
+  kill(pid, signal = 'SIGTERM', opts = {}) {
+    if (opts.group) {
+      try {
+        process.kill(-pid, signal);
+        return;
+      } catch {
+        // not a group leader, or already gone: fall back to the pid
+      }
+    }
     try {
       process.kill(pid, signal);
     } catch {

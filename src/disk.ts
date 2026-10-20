@@ -50,15 +50,25 @@ export function freeBytes(p: string): number {
   return s.bavail * s.bsize;
 }
 
-export function requiredFreeBytes(cfg: Config): number {
-  return Math.ceil(1.2 * cfg.dataPartitionBytes) + cfg.diskMarginBytes;
+/** Room one device's clone may grow into: its data partition plus slack. */
+export function perDeviceBytes(cfg: Config): number {
+  return Math.ceil(1.2 * cfg.dataPartitionBytes);
 }
 
-export function assertDiskOk(cfg: Config, free: number = freeBytes(cfg.home)): void {
-  const need = requiredFreeBytes(cfg);
+/**
+ * Free space needed to add one device while `live` devices run. Clones start near zero bytes
+ * but each may grow to its data partition, so live devices keep their share reserved.
+ */
+export function requiredFreeBytes(cfg: Config, live = 0): number {
+  return perDeviceBytes(cfg) * (live + 1) + cfg.diskMarginBytes;
+}
+
+export function assertDiskOk(cfg: Config, free: number = freeBytes(cfg.home), live = 0): void {
+  const need = requiredFreeBytes(cfg, live);
   if (free < need) {
+    const with_ = live > 0 ? ` with ${live} device${live === 1 ? '' : 's'} running` : '';
     throw new Error(
-      `not enough disk: ${(free / GB).toFixed(1)} GB free, need ${(need / GB).toFixed(1)} GB`,
+      `not enough disk: ${(free / GB).toFixed(1)} GB free, need ${(need / GB).toFixed(1)} GB${with_}`,
     );
   }
 }

@@ -15,7 +15,9 @@ type Scripted = RunResult | ((cmd: string, args: string[]) => RunResult);
 export class FakeRunner implements Runner {
   calls: FakeCall[] = [];
   alive = new Set<number>();
-  killed: { pid: number; signal?: NodeJS.Signals }[] = [];
+  killed: { pid: number; signal?: NodeJS.Signals; group?: true }[] = [];
+  /** Start times by pid; an alive pid without an entry reports `start-<pid>`. */
+  starts = new Map<number, string>();
   private scripts: { match: Matcher; result: Scripted }[] = [];
   private nextPid = 1000;
   private pidQueue: number[] = [];
@@ -66,8 +68,13 @@ export class FakeRunner implements Runner {
     return this.alive.has(pid);
   }
 
-  kill(pid: number, signal?: NodeJS.Signals): void {
-    this.killed.push({ pid, signal });
+  startTime(pid: number): string | undefined {
+    if (!this.alive.has(pid)) return undefined;
+    return this.starts.get(pid) ?? `start-${pid}`;
+  }
+
+  kill(pid: number, signal?: NodeJS.Signals, opts: { group?: boolean } = {}): void {
+    this.killed.push(opts.group ? { pid, signal, group: true } : { pid, signal });
     this.alive.delete(pid);
   }
 }

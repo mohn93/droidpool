@@ -1,11 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Runner } from './exec.ts';
+import { localProcAlive, realRunner, type Runner } from './exec.ts';
 import { ensureDirs, type Config } from './config.ts';
 import { applyConfig, TUNED_CONFIG } from './avdfiles.ts';
-import { readState, withState, type BaseRecord, type Flavor } from './state.ts';
+import { readState, withState, type BaseRecord, type Flavor, type State } from './state.ts';
 import { assertDiskOk } from './disk.ts';
 import {
+  adbEmulatorPorts,
   emulatorVersion,
   envFor,
   killDevice,
@@ -42,28 +43,46 @@ function removeAvdFiles(cfg: Config, name: string): void {
   fs.rmSync(path.join(cfg.avdHome, `${name}.ini`), { force: true });
 }
 
-/** The base emulator that buildBase has running right now, so a Ctrl-C handler can stop it. */
-let liveBuild: { pid: number; name: string } | undefined;
+/**
+ * The build this process is running, so a signal handler can stop it. avdCreated is set once
+ * avdmanager --force may have replaced the previous base's files.
+ */
+let liveBuild: { name: string; pid?: number; avdCreated: boolean } | undefined;
 
-export function currentBuildPid(): number | undefined {
-  return liveBuild?.pid;
+export function buildInProgress(): boolean {
+  return liveBuild !== undefined;
 }
 
 /**
  * Synchronous best effort for signal handlers: SIGKILL the live base emulator and remove the
- * partial base AVD files. A no-op when no base emulator is running.
+ * partial base AVD files. A no-op when no build is running. The base record is left; getters
+ * refuse a base whose snapshot files are missing.
  */
 export function abortCurrentBuild(runner: Runner, cfg: Config): void {
   const b = liveBuild;
   if (!b) return;
   liveBuild = undefined;
-  runner.kill(b.pid, 'SIGKILL');
+  if (b.pid !== undefined) runner.kill(b.pid, 'SIGKILL', { group: true });
+  if (!b.avdCreated) return;
   try {
     removeAvdFiles(cfg, b.name);
   } catch {
     // best effort; the process is exiting
   }
 }
+
+function liveBuildOf(s: State, name: string) {
+  return s.builds.find((b) => b.name === name && localProcAlive(b));
+}
+
+/** Throws while a live process is rebuilding the base, whose files are then half-written. */
+export function assertNotBuilding(s: State, name: string): void {
+  const b = liveBuildOf(s, name);
+  if (b) throw new Error(`base ${name} is being rebuilt (pid ${b.pid}); retry when the build finishes`);
+}
+
+const activeDevices = (s: State, flavor: Flavor, api: number) =>
+  s.leases.filter((l) => l.flavor === flavor && l.api === api).length;
 
 /** Number of even ports above the pool range that base builds may use. */
 const BASE_PORT_SPAN = 20;
@@ -74,14 +93,7 @@ const BASE_PORT_SPAN = 20;
  * not already list is used.
  */
 async function pickBasePort(runner: Runner, cfg: Config): Promise<number> {
-  const r = await runner.run(cfg.adbBin, ['devices'], { env: envFor(cfg), timeoutMs: 30_000 });
-  if (r.code !== 0) throw new Error(`adb devices failed: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
-  const listed = new Set(
-    r.stdout.split('\n').flatMap((line) => {
-      const m = /^emulator-(\d+)\s/.exec(line);
-      return m ? [Number(m[1])] : [];
-    }),
-  );
+  const listed = await adbEmulatorPorts(runner, cfg);
   const first = cfg.portMax + 2 + (cfg.portMax % 2);
   for (let p = first; p <= cfg.portMax + BASE_PORT_SPAN; p += 2) {
     if (!listed.has(p)) return p;
@@ -98,19 +110,32 @@ export async function buildBase(
 ): Promise<BaseRecord> {
   assertApiSupported(cfg, api);
   ensureDirs(cfg);
-  assertDiskOk(cfg, cfg.freeBytesFn(cfg.home));
   const name = baseName(flavor, api);
   const image = imageFor(flavor, api);
   const env = envFor(cfg);
 
-  io.log(`installing system image ${image}`);
-  const sdk = await runner.run(cfg.sdkmanagerBin, [image], { env, input: 'y\n', timeoutMs: 600_000 });
-  if (sdk.code !== 0) throw new Error(`sdkmanager failed: ${(sdk.stderr || sdk.stdout).trim().slice(0, 300)}`);
+  // Claim the build under the lock: getters refuse this base until it finishes, and the
+  // files are only replaced when no device is cloned from them.
+  await withState(cfg.stateFile, (s) => {
+    const other = liveBuildOf(s, name);
+    if (other) throw new Error(`base ${name} is already being built (pid ${other.pid})`);
+    const n = activeDevices(s, flavor, api);
+    if (n > 0) throw new Error(`base ${name} has ${n} active devices; release them before rebuilding`);
+    assertDiskOk(cfg, cfg.freeBytesFn(cfg.home), s.leases.length);
+    s.builds = s.builds.filter((b) => b.name !== name);
+    s.builds.push({ name, pid: process.pid, start: realRunner.startTime(process.pid), startedAt: Date.now() });
+  });
+  liveBuild = { name, avdCreated: false };
 
   let pid: number | undefined;
   let serial = '';
   try {
+    io.log(`installing system image ${image}`);
+    const sdk = await runner.run(cfg.sdkmanagerBin, [image], { env, input: 'y\n', timeoutMs: 600_000 });
+    if (sdk.code !== 0) throw new Error(`sdkmanager failed: ${(sdk.stderr || sdk.stdout).trim().slice(0, 300)}`);
+
     io.log(`creating AVD ${name}`);
+    liveBuild.avdCreated = true;
     const create = await runner.run(
       cfg.avdmanagerBin,
       ['create', 'avd', '-n', name, '-k', image, '-d', 'pixel_7', '--force'],
@@ -127,8 +152,10 @@ export async function buildBase(
     io.log(`booting ${name} on ${serial}`);
     // Same snapshot flags as devices: the explicit save below is the only write. Letting the
     // emulator also save on exit races killDevice and can truncate ram.bin.
+    // One log per build, so a FATAL line from an earlier build is never reported.
+    fs.writeFileSync(path.join(cfg.logsDir, `${name}.log`), '');
     pid = launchDevice(runner, cfg, name, port, { window: flavor === 'signed-in' });
-    liveBuild = { pid, name };
+    liveBuild.pid = pid;
     await waitBoot(runner, cfg, serial, pid, path.join(cfg.logsDir, `${name}.log`), cfg.bootPollMs);
     io.log(`settling for ${Math.round(cfg.baseSettleMs / 1000)}s`);
     await sleep(cfg.baseSettleMs);
@@ -142,7 +169,6 @@ export async function buildBase(
     await saveSnapshot(runner, cfg, serial);
     await killDevice(runner, cfg, serial, pid);
     pid = undefined;
-    liveBuild = undefined;
 
     const record: BaseRecord = {
       name,
@@ -156,7 +182,9 @@ export async function buildBase(
     await withState(cfg.stateFile, (s) => {
       s.bases = s.bases.filter((b) => b.name !== name);
       s.bases.push(record);
+      s.builds = s.builds.filter((b) => b.name !== name);
     });
+    liveBuild = undefined;
     return record;
   } catch (e) {
     if (pid !== undefined) {
@@ -166,12 +194,15 @@ export async function buildBase(
         // best effort; the original error matters more
       }
     }
+    // Before avdmanager ran, the previous base is intact and stays usable.
+    const replaced = liveBuild?.avdCreated ?? true;
     liveBuild = undefined;
-    removeAvdFiles(cfg, name);
-    // --force overwrote any previous AVD, so its record no longer describes real files.
+    if (replaced) removeAvdFiles(cfg, name);
     try {
       await withState(cfg.stateFile, (s) => {
-        s.bases = s.bases.filter((b) => b.name !== name);
+        // --force overwrote any previous AVD, so its record no longer describes real files.
+        if (replaced) s.bases = s.bases.filter((b) => b.name !== name);
+        s.builds = s.builds.filter((b) => b.name !== name);
       });
     } catch {
       // best effort; the original build error matters more
@@ -189,11 +220,13 @@ export async function removeBase(runner: Runner, cfg: Config, name: string): Pro
   await withState(cfg.stateFile, (s) => {
     const base = s.bases.find((b) => b.name === name);
     if (!base) throw new Error(`no such base: ${name}`);
-    const n = s.leases.filter((l) => l.flavor === base.flavor && l.api === base.api).length;
+    if (liveBuildOf(s, name)) throw new Error(`base ${name} is being built`);
+    const n = activeDevices(s, base.flavor, base.api);
     if (n > 0) throw new Error(`base ${name} has ${n} active devices`);
     s.bases = s.bases.filter((b) => b.name !== name);
+    // Under the lock, so a build that starts right after cannot lose its new files to this delete.
+    removeAvdFiles(cfg, name);
   });
-  removeAvdFiles(cfg, name);
 }
 
 export async function assertBaseUsable(
@@ -204,8 +237,13 @@ export async function assertBaseUsable(
 ): Promise<BaseRecord> {
   assertApiSupported(cfg, api);
   const name = baseName(flavor, api);
-  const base = readState(cfg.stateFile).bases.find((b) => b.name === name);
+  const s = readState(cfg.stateFile);
+  const base = s.bases.find((b) => b.name === name);
   if (!base) throw new Error(`no base for ${flavor} API ${api}. Build one: droidpool base build ${flavor} --api ${api}`);
+  assertNotBuilding(s, name);
+  if (!fs.existsSync(path.join(cfg.avdHome, `${name}.avd`, 'snapshots', 'default_boot', 'hardware.ini'))) {
+    throw new Error(`base ${name} has no snapshot on disk. Rebuild: droidpool base build ${flavor} --api ${api}`);
+  }
   const current = await emulatorVersion(runner, cfg);
   if (current !== base.emulatorVersion) {
     throw new Error(

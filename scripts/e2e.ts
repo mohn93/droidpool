@@ -31,7 +31,8 @@ const cli = async (...argv: string[]): Promise<string> => {
 const adb = (serial: string, ...args: string[]) =>
   realRunner.run(cfg.adbBin, ['-s', serial, ...args], { timeoutMs: 120_000 });
 
-const need = requiredFreeBytes(cfg) + 6 * GiB;
+// The second get reserves room for the first device too; the base itself takes about 6 GiB.
+const need = requiredFreeBytes(cfg, 1) + 6 * GiB;
 const free = cfg.freeBytesFn(os.tmpdir());
 if (free < need) {
   console.error(`e2e: not enough free disk: ${(free / GiB).toFixed(1)} GiB free, need ${(need / GiB).toFixed(1)} GiB`);

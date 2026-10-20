@@ -2,8 +2,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Config } from './config.ts';
-import type { Runner } from './exec.ts';
+import { procAlive, type Runner } from './exec.ts';
 import { readState, withState } from './state.ts';
+import { mayControl } from './pool.ts';
 
 /** scrcpy is pinned: a version and its published SHA-256 per macOS build. */
 export const SCRCPY_VERSION = 'v5.0.1';
@@ -19,7 +20,13 @@ export interface ViewerOpts {
   checksums?: Record<string, string>;
   download?: (url: string) => Promise<Buffer>;
   log?: (msg: string) => void;
+  /** When set (MCP), only the owning session, or anyone once the owner is gone, may show the device. */
+  requireOwnerPid?: number;
 }
+
+const DOWNLOAD_TIMEOUT_MS = 120_000;
+/** The release tarballs are about 5 MB; anything far larger is not what we pinned. */
+const DOWNLOAD_MAX_BYTES = 64 * 1024 * 1024;
 
 function scrcpyArch(arch: string): string {
   if (arch === 'arm64') return 'aarch64';
@@ -36,9 +43,13 @@ export function scrcpyDir(cfg: Config, arch: string = process.arch): string {
 }
 
 async function fetchBytes(url: string): Promise<Buffer> {
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`scrcpy download failed: HTTP ${res.status} for ${url}`);
-  return Buffer.from(await res.arrayBuffer());
+  const len = Number(res.headers.get('content-length') ?? 0);
+  if (len > DOWNLOAD_MAX_BYTES) throw new Error(`scrcpy download too large: ${len} bytes`);
+  const bytes = Buffer.from(await res.arrayBuffer());
+  if (bytes.length > DOWNLOAD_MAX_BYTES) throw new Error(`scrcpy download too large: ${bytes.length} bytes`);
+  return bytes;
 }
 
 /**
@@ -60,18 +71,27 @@ export async function ensureScrcpy(runner: Runner, cfg: Config, opts: ViewerOpts
   const got = crypto.createHash('sha256').update(bytes).digest('hex');
   if (got !== want) throw new Error(`scrcpy download checksum mismatch: expected ${want}, got ${got}`);
 
+  // Unpack into a private staging dir and rename it into place, so `dir` only ever appears
+  // complete and concurrent installs never touch each other's files.
   const toolsDir = path.dirname(dir);
   fs.mkdirSync(toolsDir, { recursive: true });
-  const tarball = path.join(toolsDir, `${name}.tar.gz`);
-  fs.writeFileSync(tarball, bytes);
+  const staging = fs.mkdtempSync(path.join(toolsDir, `.staging-${process.pid}-`));
   try {
-    const r = await runner.run('tar', ['-xzf', tarball, '-C', toolsDir], { timeoutMs: 60_000 });
-    if (r.code !== 0 || !fs.existsSync(bin)) {
-      fs.rmSync(dir, { recursive: true, force: true });
+    const tarball = path.join(staging, `${name}.tar.gz`);
+    fs.writeFileSync(tarball, bytes);
+    const r = await runner.run('tar', ['-xzf', tarball, '-C', staging], { timeoutMs: 60_000 });
+    const staged = path.join(staging, name);
+    if (r.code !== 0 || !fs.existsSync(path.join(staged, 'scrcpy'))) {
       throw new Error(`scrcpy unpack failed: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
     }
+    try {
+      fs.renameSync(staged, dir);
+    } catch (e) {
+      // Another install finished first; use its copy.
+      if (!fs.existsSync(bin)) throw e;
+    }
   } finally {
-    fs.rmSync(tarball, { force: true });
+    fs.rmSync(staging, { recursive: true, force: true });
   }
   return bin;
 }
@@ -81,7 +101,12 @@ export async function showDevice(runner: Runner, cfg: Config, serial: string, op
   const lease = readState(cfg.stateFile).leases.find((l) => l.serial === serial);
   if (!lease) throw new Error(`no device ${serial}`);
   if (lease.state === 'booting') throw new Error(`device ${serial} is still booting`);
-  if (lease.viewerPid !== undefined && runner.isAlive(lease.viewerPid)) return `already showing ${serial}`;
+  if (opts.requireOwnerPid !== undefined && !mayControl(runner, lease.owner, opts.requireOwnerPid, Date.now())) {
+    throw new Error(`device ${serial} belongs to another session`);
+  }
+  const showing = (l: { viewerPid?: number; viewerStart?: string }) =>
+    l.viewerPid !== undefined && procAlive(runner, l.viewerPid, l.viewerStart);
+  if (showing(lease)) return `already showing ${serial}`;
 
   const bin = await ensureScrcpy(runner, cfg, opts);
   const title = `${serial} (${path.basename(lease.project)})`;
@@ -90,14 +115,21 @@ export async function showDevice(runner: Runner, cfg: Config, serial: string, op
     env: { ...process.env, ADB: cfg.adbBin },
     logFile: path.join(cfg.logsDir, `${lease.deviceId}-scrcpy.log`),
   });
-  const recorded = await withState(cfg.stateFile, (s) => {
+  const viewerStart = runner.startTime(pid);
+  // Re-checked under the lock: a concurrent show may have recorded its window first, and a
+  // release that drops the lease after this point closes the window recorded here.
+  const recorded = await withState(cfg.stateFile, (s): 'ok' | 'gone' | 'other' => {
     const l = s.leases.find((x) => x.deviceId === lease.deviceId);
-    if (!l) return false;
+    if (!l) return 'gone';
+    if (showing(l)) return 'other';
     l.viewerPid = pid;
-    return true;
+    if (viewerStart !== undefined) l.viewerStart = viewerStart;
+    else delete l.viewerStart;
+    return 'ok';
   });
-  if (!recorded) {
-    runner.kill(pid, 'SIGTERM');
+  if (recorded !== 'ok') {
+    runner.kill(pid, 'SIGTERM', { group: true });
+    if (recorded === 'other') return `already showing ${serial}`;
     throw new Error(`no device ${serial}`);
   }
   return `showing ${serial} in a window titled "${title}"`;

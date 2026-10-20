@@ -256,3 +256,30 @@ test('show_device opens a mirror window for the device', async () => {
   assert.match(text(bad), /no device emulator-5699/);
   await close();
 });
+
+test('release_device for an unknown serial is a tool error', async () => {
+  const { cfg } = setup();
+  const { client, close } = await connect(cfg, fakeRunner(cfg));
+  const res = await client.callTool({ name: 'release_device', arguments: { serial: 'emulator-5699' } });
+  assert.equal(res.isError, true);
+  assert.equal(text(res), 'no device emulator-5699');
+  await close();
+});
+
+test('show_device refuses another live session\'s device', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg);
+  r.alive.add(OTHER_PID).add(7001);
+  await withState(cfg.stateFile, (s) => {
+    s.leases.push({
+      deviceId: 'dev-aaaaa0', serial: 'emulator-5620', port: 5620, emulatorPid: 7001, flavor: 'clean', api: 35,
+      project: '/p', owner: { kind: 'mcp', pid: OTHER_PID }, createdAt: Date.now(), state: 'ready',
+    });
+  });
+  const { client, close } = await connect(cfg, r);
+  const res = await client.callTool({ name: 'show_device', arguments: { serial: 'emulator-5620' } });
+  assert.equal(res.isError, true);
+  assert.equal(text(res), 'device emulator-5620 belongs to another session');
+  assert.ok(!r.calls.some((c) => c.kind === 'spawn'));
+  await close();
+});

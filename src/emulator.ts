@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Runner } from './exec.ts';
+import { procAlive, type Runner } from './exec.ts';
 import type { Config } from './config.ts';
 
 export function envFor(cfg: Config): NodeJS.ProcessEnv {
@@ -65,19 +65,44 @@ export async function waitBoot(
   }
 }
 
+/**
+ * Asks the emulator to exit, then SIGKILLs its process group if it is still running after
+ * killWaitMs. With a recorded start time, a reused pid is never signalled.
+ */
 export async function killDevice(
   runner: Runner,
   cfg: Config,
   serial: string,
   pid: number,
+  start?: string,
 ): Promise<void> {
   // Non-zero exit is expected when the emulator is already dead.
   await runner.run(cfg.adbBin, ['-s', serial, 'emu', 'kill'], { env: envFor(cfg), timeoutMs: 10_000 });
+  const step = Math.min(100, Math.max(1, cfg.killWaitMs / 10));
   const deadline = Date.now() + cfg.killWaitMs;
-  while (runner.isAlive(pid) && Date.now() < deadline) {
-    await sleep(Math.min(100, Math.max(1, cfg.killWaitMs / 10)));
-  }
-  if (runner.isAlive(pid)) runner.kill(pid, 'SIGKILL');
+  while (procAlive(runner, pid, start) && Date.now() < deadline) await sleep(step);
+  if (!procAlive(runner, pid, start)) return;
+  // The emulator leads its own group (spawned detached), so helpers it started die with it.
+  runner.kill(pid, 'SIGKILL', { group: true });
+  const gone = Date.now() + 2000;
+  while (procAlive(runner, pid, start) && Date.now() < gone) await sleep(step);
+}
+
+/** Console ports of every emulator adb knows about, droidpool's or not. */
+export async function adbEmulatorPorts(runner: Runner, cfg: Config): Promise<Set<number>> {
+  const r = await runner.run(cfg.adbBin, ['devices'], { env: envFor(cfg), timeoutMs: 30_000 });
+  if (r.code !== 0) throw new Error(`adb devices failed: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
+  return new Set(
+    r.stdout.split('\n').flatMap((line) => {
+      const m = /^emulator-(\d+)\s/.exec(line);
+      return m ? [Number(m[1])] : [];
+    }),
+  );
+}
+
+/** The emulator keeps a per-port modem file in its home (~/.android); remove it on teardown. */
+export function removeModemFile(cfg: Config, port: number): void {
+  fs.rmSync(path.join(cfg.emulatorHome, `modem-nv-ram-${port}`), { force: true });
 }
 
 export async function setAnimationsOff(runner: Runner, cfg: Config, serial: string): Promise<void> {

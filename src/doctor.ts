@@ -4,7 +4,7 @@ import type { Config } from './config.ts';
 import { emulatorVersion } from './emulator.ts';
 import { listBases } from './base.ts';
 import { listDevices } from './pool.ts';
-import { requiredFreeBytes } from './disk.ts';
+import { perDeviceBytes, requiredFreeBytes } from './disk.ts';
 
 const gb = (n: number) => (n / 2 ** 30).toFixed(1);
 
@@ -19,8 +19,11 @@ export async function doctorReport(runner: Runner, cfg: Config): Promise<string>
     lines.push(`emulator: unavailable (${e instanceof Error ? e.message : String(e)})`);
   }
   lines.push(`bases: ${bases.length}`);
-  lines.push(`devices: ${listDevices(cfg).length}`);
-  lines.push(`free disk: ${gb(cfg.freeBytesFn(cfg.home))} GB (need ${gb(requiredFreeBytes(cfg))} GB per device)`);
+  const live = listDevices(cfg).length;
+  lines.push(`devices: ${live}`);
+  lines.push(
+    `free disk: ${gb(cfg.freeBytesFn(cfg.home))} GB (need ${gb(requiredFreeBytes(cfg, live))} GB to add a device: ${gb(perDeviceBytes(cfg))} GB per device plus margin)`,
+  );
 
   let size = '0';
   if (bases.length > 0) {
@@ -28,7 +31,7 @@ export async function doctorReport(runner: Runner, cfg: Config): Promise<string>
     const r = await runner.run('du', ['-shc', ...dirs]);
     // With -c the last line is the total.
     const last = r.stdout.trim().split('\n').pop() ?? '';
-    size = last.split(/\s+/)[0] || 'unknown';
+    size = last.trim().split(/\s+/)[0] || 'unknown';
   }
   lines.push(`bases on disk: ${size}`);
 

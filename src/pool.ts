@@ -1,14 +1,14 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Runner } from './exec.ts';
+import { localProcAlive, procAlive, realRunner, type Runner } from './exec.ts';
 import { ensureDirs, type Config } from './config.ts';
 import { deviceIni, rewriteHardwareIni } from './avdfiles.ts';
 import { readState, withState, type Flavor, type Lease, type Owner, type State } from './state.ts';
 import { assertDiskOk, cloneDir } from './disk.ts';
 import { pickPort } from './ports.ts';
-import { assertBaseUsable } from './base.ts';
-import { killDevice, launchDevice, waitBoot } from './emulator.ts';
+import { assertBaseUsable, assertNotBuilding } from './base.ts';
+import { adbEmulatorPorts, killDevice, launchDevice, removeModemFile, waitBoot } from './emulator.ts';
 
 export interface DeviceInfo {
   serial: string;
@@ -31,6 +31,7 @@ const DEFAULT_API = 35;
 /** Extra slack past bootTimeoutMs before a 'booting' lease is presumed abandoned by its getter. */
 const BOOTING_GRACE_MS = 60_000;
 const DEVICE_FILE_RE = /^(dev-[^/]+)\.(avd|ini)$/;
+const DEVICE_LOG_RE = /^(dev-[^/]+?)(-scrcpy)?\.log$/;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -49,27 +50,68 @@ function toInfo(l: Lease): DeviceInfo {
 const devDir = (cfg: Config, id: string) => path.join(cfg.avdHome, `${id}.avd`);
 const devIni = (cfg: Config, id: string) => path.join(cfg.avdHome, `${id}.ini`);
 
-// pid 0 is the placeholder for "not launched yet"; never probe or signal it.
-const pidAlive = (runner: Runner, pid: number) => pid > 0 && runner.isAlive(pid);
+// pid 0 is the placeholder for "not launched yet"; procAlive never probes or signals it.
+const pidAlive = (runner: Runner, pid: number, start?: string) => procAlive(runner, pid, start);
 
-function removeDeviceFiles(cfg: Config, id: string): void {
+export function removeDeviceFiles(cfg: Config, id: string): void {
   fs.rmSync(devDir(cfg, id), { recursive: true, force: true });
   fs.rmSync(devIni(cfg, id), { force: true });
+  fs.rmSync(path.join(cfg.logsDir, `${id}.log`), { force: true });
+  fs.rmSync(path.join(cfg.logsDir, `${id}-scrcpy.log`), { force: true });
+}
+
+function killViewer(runner: Runner, l: Lease): void {
+  if (l.viewerPid !== undefined && pidAlive(runner, l.viewerPid, l.viewerStart)) {
+    runner.kill(l.viewerPid, 'SIGTERM', { group: true });
+  }
+}
+
+/**
+ * pids of emulators launched for this device id. Covers the window where a getter died
+ * between launching the emulator and recording its pid.
+ */
+async function findEmulators(runner: Runner, id: string): Promise<number[]> {
+  const r = await runner.run('pgrep', ['-f', '--', `-avd ${id} -port`], { timeoutMs: 10_000 });
+  if (r.code !== 0) return [];
+  return r.stdout.split('\n').flatMap((t) => (/^\d+$/.test(t.trim()) ? [Number(t.trim())] : []));
 }
 
 /** Kill the emulator if alive and remove its files. The caller removes the lease afterwards. */
 async function teardown(runner: Runner, cfg: Config, l: Lease): Promise<void> {
-  if (l.viewerPid !== undefined && pidAlive(runner, l.viewerPid)) runner.kill(l.viewerPid, 'SIGTERM');
-  if (pidAlive(runner, l.emulatorPid)) await killDevice(runner, cfg, l.serial, l.emulatorPid);
+  killViewer(runner, l);
+  if (pidAlive(runner, l.emulatorPid, l.emulatorStart)) {
+    await killDevice(runner, cfg, l.serial, l.emulatorPid, l.emulatorStart);
+  } else if (l.emulatorPid === 0) {
+    for (const pid of await findEmulators(runner, l.deviceId)) runner.kill(pid, 'SIGKILL', { group: true });
+  }
   removeDeviceFiles(cfg, l.deviceId);
+  removeModemFile(cfg, l.port);
 }
 
-async function dropLeases(cfg: Config, ids: string[]): Promise<void> {
+async function dropLeases(runner: Runner, cfg: Config, ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   const drop = new Set(ids);
   await withState(cfg.stateFile, (s) => {
+    // A viewer recorded after the teardown snapshot was taken is closed here, under the lock.
+    for (const l of s.leases) if (drop.has(l.deviceId)) killViewer(runner, l);
     s.leases = s.leases.filter((l) => !drop.has(l.deviceId));
   });
+}
+
+/** Getters in this process that have not finished, so a signal handler can stop their emulators. */
+const liveGets = new Map<string, { pid: number }>();
+
+/** Synchronous best effort for signal handlers: SIGKILL emulators this process is still booting. */
+export function abortCurrentGets(runner: Runner, cfg: Config): void {
+  for (const [id, g] of liveGets) {
+    if (g.pid > 0) runner.kill(g.pid, 'SIGKILL', { group: true });
+    try {
+      removeDeviceFiles(cfg, id);
+    } catch {
+      // best effort; the reaper removes the rest once it sees this getter is gone
+    }
+  }
+  liveGets.clear();
 }
 
 function newDeviceId(cfg: Config, s: State): string {
@@ -97,13 +139,13 @@ function tryAdopt(
 ): DeviceInfo | undefined {
   if (l.state === 'booting') throw new Error(`device ${l.serial} is still booting`);
   const o = l.owner;
-  if (o.kind === 'mcp' && owner.kind === 'mcp' && o.pid === owner.pid) return toInfo(l);
+  if (o.kind === 'mcp' && owner.kind === 'mcp' && o.pid === owner.pid && o.start === owner.start) return toInfo(l);
   if (l.flavor !== req.flavor || l.api !== api) return undefined;
-  if (o.kind === 'cli' || (o.goneSince === undefined && runner.isAlive(o.pid))) {
+  if (o.kind === 'cli' || (o.goneSince === undefined && pidAlive(runner, o.pid, o.start))) {
     throw new Error(`device ${l.serial} is owned by another live session`);
   }
   const withinGrace = o.goneSince === undefined || now - o.goneSince <= cfg.ownerGraceMs;
-  if (!withinGrace || !pidAlive(runner, l.emulatorPid)) return undefined;
+  if (!withinGrace || !pidAlive(runner, l.emulatorPid, l.emulatorStart)) return undefined;
   l.owner = owner;
   l.project = req.project;
   return toInfo(l);
@@ -116,7 +158,10 @@ export async function getDevice(
 ): Promise<DeviceInfo> {
   ensureDirs(cfg);
   const api = req.api ?? DEFAULT_API;
-  const owner: Owner = req.owner.kind === 'mcp' ? { kind: 'mcp', pid: req.owner.pid } : { ...req.owner };
+  const owner: Owner =
+    req.owner.kind === 'mcp'
+      ? { kind: 'mcp', pid: req.owner.pid, ...(req.owner.start !== undefined && { start: req.owner.start }) }
+      : { ...req.owner };
   await reap(runner, cfg);
 
   if (req.reuseSerial !== undefined) {
@@ -133,11 +178,18 @@ export async function getDevice(
 
   const deadline = Date.now() + cfg.queueWaitMs;
   let lease: Lease;
+  const getter = { pid: process.pid, start: realRunner.startTime(process.pid) };
   for (;;) {
+    // Emulators droidpool does not own (another pool, a hand-started one) hold ports too.
+    const foreign = await adbEmulatorPorts(runner, cfg);
     const got = await withState(cfg.stateFile, (s): Lease | null => {
       if (s.leases.length >= cfg.maxDevices) return null;
-      assertDiskOk(cfg, cfg.freeBytesFn(cfg.home));
-      const port = pickPort(cfg, new Set(s.leases.map((l) => l.port)));
+      assertNotBuilding(s, base.name);
+      if (!s.bases.some((b) => b.name === base.name)) {
+        throw new Error(`no base for ${req.flavor} API ${api}. Build one: droidpool base build ${req.flavor} --api ${api}`);
+      }
+      assertDiskOk(cfg, cfg.freeBytesFn(cfg.home), s.leases.length);
+      const port = pickPort(cfg, new Set([...s.leases.map((l) => l.port), ...foreign]));
       if (port === null) throw new Error('no free emulator port');
       const l: Lease = {
         deviceId: newDeviceId(cfg, s),
@@ -150,6 +202,7 @@ export async function getDevice(
         owner,
         createdAt: Date.now(),
         state: 'booting',
+        getter,
       };
       s.leases.push(l);
       return l;
@@ -167,6 +220,8 @@ export async function getDevice(
   const { deviceId: id, serial } = lease;
   const dir = devDir(cfg, id);
   let pid = 0;
+  const live = { pid: 0 };
+  liveGets.set(id, live);
   try {
     await cloneDir(runner, baseDir, dir, cfg.cloneProbe);
     fs.rmSync(path.join(dir, 'multiinstance.lock'), { force: true });
@@ -176,30 +231,37 @@ export async function getDevice(
     fs.writeFileSync(devIni(cfg, id), deviceIni(dir, api));
 
     pid = launchDevice(runner, cfg, id, lease.port);
+    live.pid = pid;
+    const emulatorStart = runner.startTime(pid);
     await updateLease(cfg, id, (l) => {
       l.emulatorPid = pid;
+      if (emulatorStart !== undefined) l.emulatorStart = emulatorStart;
     });
     await waitBoot(runner, cfg, serial, pid, path.join(cfg.logsDir, `${id}.log`), cfg.bootPollMs);
     return await updateLease(cfg, id, (l) => {
       l.state = 'ready';
+      delete l.getter;
     });
   } catch (e) {
     try {
       const stillLeased = await withState(cfg.stateFile, (s) => s.leases.some((l) => l.deviceId === id));
       if (stillLeased) {
         await teardown(runner, cfg, { ...lease, emulatorPid: pid });
-        await dropLeases(cfg, [id]);
+        await dropLeases(runner, cfg, [id]);
       } else {
         // Our lease was reaped, so its serial may already belong to another device: never `emu kill` it.
-        if (pidAlive(runner, pid)) runner.kill(pid, 'SIGKILL');
+        if (pidAlive(runner, pid)) runner.kill(pid, 'SIGKILL', { group: true });
         removeDeviceFiles(cfg, id);
       }
     } catch {
       // best effort; reap retries, and the original error matters more
     }
     throw e;
+  } finally {
+    liveGets.delete(id);
   }
 }
+
 
 async function updateLease(cfg: Config, id: string, fn: (l: Lease) => void): Promise<DeviceInfo> {
   return withState(cfg.stateFile, (s) => {
@@ -214,28 +276,33 @@ export async function releaseDevice(
   runner: Runner,
   cfg: Config,
   serial: string,
-  opts: { requireOwnerPid?: number } = {},
+  opts: { requireOwnerPid?: number; force?: boolean } = {},
 ): Promise<{ released: boolean; message: string }> {
   const l = await withState(cfg.stateFile, (s) => {
     const found = s.leases.find((x) => x.serial === serial);
     if (!found) return undefined;
     // A booting lease's emulator pid is not recorded yet; its getter owns the cleanup.
     if (found.state === 'booting') throw new Error(`device ${serial} is still booting`);
-    if (opts.requireOwnerPid !== undefined && !mayRelease(runner, found.owner, opts.requireOwnerPid, Date.now())) {
-      throw new Error(`device ${serial} belongs to another session`);
+    const o = found.owner;
+    if (opts.requireOwnerPid !== undefined) {
+      if (!mayControl(runner, o, opts.requireOwnerPid, Date.now())) {
+        throw new Error(`device ${serial} belongs to another session`);
+      }
+    } else if (!opts.force && o.kind === 'mcp' && !o.exited && pidAlive(runner, o.pid, o.start)) {
+      throw new Error(`device ${serial} belongs to a live MCP session (pid ${o.pid}); pass --force to release it anyway`);
     }
     return { ...found };
   });
   if (!l) return { released: false, message: `no device ${serial}` };
   await teardown(runner, cfg, l);
-  await dropLeases(cfg, [l.deviceId]);
+  await dropLeases(runner, cfg, [l.deviceId]);
   return { released: true, message: `released ${serial} (${l.deviceId})` };
 }
 
 /** True when `pid` owns the lease, or its owner is gone (dead mcp process or expired cli lease). */
-function mayRelease(runner: Runner, o: Owner, pid: number, now: number): boolean {
+export function mayControl(runner: Runner, o: Owner, pid: number, now: number): boolean {
   if (o.kind === 'cli') return o.expiresAt <= now;
-  return o.pid === pid || !runner.isAlive(o.pid);
+  return o.pid === pid || !pidAlive(runner, o.pid, o.start);
 }
 
 export async function renewLease(cfg: Config, serial: string): Promise<DeviceInfo> {
@@ -253,11 +320,15 @@ export function listDevices(cfg: Config): DeviceInfo[] {
 
 /** Decides (and records goneSince) under the lock; returns true when the lease should be removed. */
 function shouldReap(runner: Runner, cfg: Config, l: Lease, now: number): boolean {
-  if (l.state === 'booting') return now - l.createdAt >= cfg.bootTimeoutMs + BOOTING_GRACE_MS;
+  if (l.state === 'booting') {
+    // A dead getter will never finish the boot; otherwise give it the boot timeout plus slack.
+    if (l.getter && !localProcAlive(l.getter)) return true;
+    return now - l.createdAt >= cfg.bootTimeoutMs + BOOTING_GRACE_MS;
+  }
   const o = l.owner;
   if (o.kind === 'cli') {
     if (o.expiresAt <= now) return true;
-  } else if (!o.exited && runner.isAlive(o.pid)) {
+  } else if (!o.exited && pidAlive(runner, o.pid, o.start)) {
     // An owner marked exited by its own clean shutdown keeps its mark even while the pid
     // lingers (or is reused), so the delayed gc can still reap it after the grace period.
     delete o.goneSince;
@@ -266,7 +337,7 @@ function shouldReap(runner: Runner, cfg: Config, l: Lease, now: number): boolean
   } else if (now - o.goneSince > cfg.ownerGraceMs) {
     return true;
   }
-  return !pidAlive(runner, l.emulatorPid);
+  return !pidAlive(runner, l.emulatorPid, l.emulatorStart);
 }
 
 export async function reap(runner: Runner, cfg: Config, now: number = Date.now()): Promise<string[]> {
@@ -278,6 +349,10 @@ export async function reap(runner: Runner, cfg: Config, now: number = Date.now()
     const strays = new Set<string>();
     for (const name of fs.readdirSync(cfg.avdHome)) {
       const m = DEVICE_FILE_RE.exec(name);
+      if (m && !leased.has(m[1]!)) strays.add(m[1]!);
+    }
+    for (const name of fs.readdirSync(cfg.logsDir)) {
+      const m = DEVICE_LOG_RE.exec(name);
       if (m && !leased.has(m[1]!)) strays.add(m[1]!);
     }
     return { victims, strays: [...strays] };
@@ -301,7 +376,7 @@ export async function reap(runner: Runner, cfg: Config, now: number = Date.now()
       logReapFailure(id, e);
     }
   }
-  await dropLeases(cfg, torn);
+  await dropLeases(runner, cfg, torn);
   return [...torn, ...swept];
 }
 

@@ -13,8 +13,14 @@ export interface BaseRecord {
   builtAt: string;
 }
 
+/** A process by pid plus its start time, so a reused pid is not mistaken for it. */
+export interface ProcRef {
+  pid: number;
+  start?: string;
+}
+
 export type Owner =
-  | { kind: 'mcp'; pid: number; goneSince?: number; exited?: true }
+  | { kind: 'mcp'; pid: number; start?: string; goneSince?: number; exited?: true }
   | { kind: 'cli'; expiresAt: number };
 
 export interface Lease {
@@ -22,6 +28,7 @@ export interface Lease {
   serial: string;
   port: number;
   emulatorPid: number;
+  emulatorStart?: string;
   flavor: Flavor;
   api: number;
   project: string;
@@ -30,18 +37,28 @@ export interface Lease {
   state: 'booting' | 'ready';
   /** pid of the scrcpy mirror window opened by `droidpool show`, if any. */
   viewerPid?: number;
+  viewerStart?: string;
+  /** The process running getDevice while the lease is booting; a dead getter means an abandoned boot. */
+  getter?: ProcRef;
+}
+
+/** A base build in progress; getters refuse that base and a second build of it is refused. */
+export interface BuildRecord extends ProcRef {
+  name: string;
+  startedAt: number;
 }
 
 export interface State {
   bases: BaseRecord[];
   leases: Lease[];
+  builds: BuildRecord[];
 }
 
 const RETRY_MS = 25;
 const STALE_MS = 30_000;
 
 function emptyState(): State {
-  return { bases: [], leases: [] };
+  return { bases: [], leases: [], builds: [] };
 }
 
 export function readState(stateFile: string): State {
@@ -53,7 +70,7 @@ export function readState(stateFile: string): State {
     throw e;
   }
   const parsed = JSON.parse(raw) as Partial<State>;
-  return { bases: parsed.bases ?? [], leases: parsed.leases ?? [] };
+  return { bases: parsed.bases ?? [], leases: parsed.leases ?? [], builds: parsed.builds ?? [] };
 }
 
 function writeStateAtomic(stateFile: string, s: State): void {

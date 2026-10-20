@@ -146,3 +146,46 @@ test('releasing a device closes its viewer', async () => {
   assert.equal(res.released, true);
   assert.ok(r.killed.some((k) => k.pid === 8100));
 });
+
+test('concurrent first installs both end with one complete copy', async () => {
+  const { cfg } = setup();
+  const r = tarRunner();
+  const [a, b] = await Promise.all([ensureScrcpy(r, cfg, opts([])), ensureScrcpy(r, cfg, opts([]))]);
+  assert.equal(a, b);
+  assert.ok(fs.existsSync(a));
+  // Only the installed release remains: no tarballs or staging dirs.
+  assert.deepEqual(fs.readdirSync(path.join(cfg.home, 'tools')), [`scrcpy-macos-aarch64-${SCRCPY_VERSION}`]);
+});
+
+test('a failed unpack leaves no install behind', async () => {
+  const { cfg } = setup();
+  const r = new FakeRunner().onRun((c) => c === 'tar', { code: 1, stdout: '', stderr: 'truncated' });
+  await assert.rejects(ensureScrcpy(r, cfg, opts([])), /scrcpy unpack failed: truncated/);
+  assert.deepEqual(fs.readdirSync(path.join(cfg.home, 'tools')), []);
+});
+
+test('showDevice keeps the window a concurrent show recorded first', async () => {
+  const { cfg } = setup();
+  await withState(cfg.stateFile, (s) => {
+    s.leases.push(lease());
+  });
+  const r = tarRunner().onSpawn(8200);
+  r.alive.add(8100);
+  // The other show records its window after this one read the lease.
+  r.onRun(
+    (c) => c === 'tar',
+    (_c, a) => {
+      const dest = a[a.indexOf('-C') + 1]!;
+      const dir = path.join(dest, `scrcpy-macos-aarch64-${SCRCPY_VERSION}`);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'scrcpy'), '#!/bin/sh\n');
+      const st = readState(cfg.stateFile);
+      st.leases[0]!.viewerPid = 8100;
+      fs.writeFileSync(cfg.stateFile, JSON.stringify(st));
+      return { code: 0, stdout: '', stderr: '' };
+    },
+  );
+  assert.match(await showDevice(r, cfg, 'emulator-5620', opts([])), /already showing emulator-5620/);
+  assert.deepEqual(r.killed, [{ pid: 8200, signal: 'SIGTERM', group: true }]);
+  assert.equal(readState(cfg.stateFile).leases[0]!.viewerPid, 8100);
+});

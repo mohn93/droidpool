@@ -599,7 +599,138 @@ test('getter failure after its lease vanished kills by pid only', async () => {
     /was released while booting/,
   );
   assert.ok(!r.calls.some((c) => c.args.join(' ') === '-s emulator-5620 emu kill'));
-  assert.deepEqual(r.killed, [{ pid: 5001, signal: 'SIGKILL' }]);
+  assert.deepEqual(r.killed, [{ pid: 5001, signal: 'SIGKILL', group: true }]);
   assert.ok(r.isAlive(7009));
   assert.deepEqual(readState(cfg.stateFile).leases.map((l) => l.deviceId), ['dev-999999']);
+});
+
+test('a reused emulator pid counts as dead and is never signalled', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg);
+  r.alive.add(7001);
+  r.starts.set(7001, 'later process');
+  await seed(cfg, lease({ emulatorStart: 'original emulator' }));
+  assert.deepEqual(await reap(r, cfg), ['dev-aaaaaa']);
+  assert.deepEqual(r.killed, []);
+  assert.ok(!r.calls.some((c) => c.args.includes('kill')));
+  assert.ok(r.isAlive(7001));
+});
+
+test('a reused mcp owner pid counts as gone', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg);
+  r.alive.add(7001).add(7777);
+  r.starts.set(7777, 'later process');
+  await seed(cfg, lease({ owner: { kind: 'mcp', pid: 7777, start: 'original server' } }));
+  const now = Date.now();
+  assert.deepEqual(await reap(r, cfg, now), []);
+  const o = readState(cfg.stateFile).leases[0]!.owner;
+  assert.ok(o.kind === 'mcp' && o.goneSince === now);
+  assert.deepEqual(await reap(r, cfg, now + cfg.ownerGraceMs + 1), ['dev-aaaaaa']);
+});
+
+test('a booting lease whose getter died is reaped at once, finding its emulator by id', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg);
+  r.alive.add(6001);
+  r.onRun((c, a) => c === 'pgrep' && a.includes('-avd dev-aaaaaa -port'), { code: 0, stdout: '6001\n', stderr: '' });
+  await seed(cfg, lease({ state: 'booting', emulatorPid: 0, getter: { pid: DEAD_PID } }));
+  assert.deepEqual(await reap(r, cfg), ['dev-aaaaaa']);
+  assert.deepEqual(r.killed, [{ pid: 6001, signal: 'SIGKILL', group: true }]);
+  assert.ok(!fs.existsSync(devDir(cfg, 'dev-aaaaaa')));
+});
+
+test('a booting lease whose getter is alive waits for the boot timeout', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg);
+  await seed(cfg, lease({ state: 'booting', emulatorPid: 0, getter: { pid: process.pid } }));
+  assert.deepEqual(await reap(r, cfg), []);
+});
+
+test('get skips ports held by emulators droidpool does not own', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg).onSpawn(5001);
+  r.onRun((c, a) => c === cfg.adbBin && a[0] === 'devices', {
+    code: 0,
+    stdout: 'List of devices attached\nemulator-5620\tdevice\nemulator-5622\toffline\n\n',
+    stderr: '',
+  });
+  const d = await getDevice(r, cfg, { flavor: 'clean', project: '/p', owner: cli() });
+  assert.equal(d.serial, 'emulator-5624');
+  const l = readState(cfg.stateFile).leases[0]!;
+  assert.equal(l.emulatorStart, 'start-5001');
+  assert.equal(l.getter, undefined);
+});
+
+test('get keeps disk reserved for devices already running', async () => {
+  const { cfg } = setup({ freeBytesFn: () => 12 * 2 ** 30 });
+  const r = fakeRunner(cfg).onSpawn(5001, 5002);
+  await getDevice(r, cfg, { flavor: 'clean', project: '/p', owner: cli() });
+  await assert.rejects(getDevice(r, cfg, { flavor: 'clean', project: '/p', owner: cli() }), {
+    message: 'not enough disk: 12.0 GB free, need 16.4 GB with 1 device running',
+  });
+});
+
+test('release removes the device logs and its modem file; reap sweeps stray logs', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg);
+  r.alive.add(7001);
+  await seed(cfg, lease({}));
+  fs.mkdirSync(cfg.logsDir, { recursive: true });
+  fs.mkdirSync(cfg.emulatorHome, { recursive: true });
+  for (const f of ['dev-aaaaaa.log', 'dev-aaaaaa-scrcpy.log', 'dev-dddddd.log', 'dev-dddddd-scrcpy.log', 'base-clean-35.log']) {
+    fs.writeFileSync(path.join(cfg.logsDir, f), 'x');
+  }
+  fs.writeFileSync(path.join(cfg.emulatorHome, 'modem-nv-ram-5620'), 'x');
+  fs.writeFileSync(path.join(cfg.emulatorHome, 'adbkey'), 'keep');
+  await releaseDevice(r, cfg, 'emulator-5620');
+  assert.ok(!fs.existsSync(path.join(cfg.emulatorHome, 'modem-nv-ram-5620')));
+  assert.ok(fs.existsSync(path.join(cfg.emulatorHome, 'adbkey')));
+  assert.deepEqual(await reap(r, cfg), ['dev-dddddd']);
+  assert.deepEqual(fs.readdirSync(cfg.logsDir), ['base-clean-35.log']);
+});
+
+test('release without force refuses a live mcp session\'s device', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg);
+  r.alive.add(7001).add(7777);
+  await seed(cfg, lease({ owner: { kind: 'mcp', pid: 7777 } }));
+  await assert.rejects(releaseDevice(r, cfg, 'emulator-5620'), {
+    message: 'device emulator-5620 belongs to a live MCP session (pid 7777); pass --force to release it anyway',
+  });
+  assert.equal(readState(cfg.stateFile).leases.length, 1);
+  assert.equal((await releaseDevice(r, cfg, 'emulator-5620', { force: true })).released, true);
+});
+
+test('dropping a lease closes a viewer recorded after the release snapshot', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg);
+  r.alive.add(7001).add(8100);
+  await seed(cfg, lease({}));
+  r.onRun((c, a) => c === cfg.adbBin && a.includes('emu') && a.includes('kill'), () => {
+    // A show records its window while the release is tearing the device down.
+    const st = readState(cfg.stateFile);
+    st.leases[0]!.viewerPid = 8100;
+    fs.writeFileSync(cfg.stateFile, JSON.stringify(st));
+    r.alive.delete(7001);
+    return { code: 0, stdout: '', stderr: '' };
+  });
+  await releaseDevice(r, cfg, 'emulator-5620');
+  assert.ok(r.killed.some((k) => k.pid === 8100));
+  assert.equal(readState(cfg.stateFile).leases.length, 0);
+});
+
+test('get refuses a base that a live process is rebuilding', async () => {
+  const { cfg } = setup();
+  const r = fakeRunner(cfg);
+  await withState(cfg.stateFile, (s) => {
+    s.builds.push({ name: 'base-clean-35', pid: process.pid, startedAt: Date.now() });
+  });
+  await assert.rejects(getDevice(r, cfg, { flavor: 'clean', project: '/p', owner: cli() }), /base base-clean-35 is being rebuilt/);
+  // A build record left by a dead process does not block.
+  await withState(cfg.stateFile, (s) => {
+    s.builds = [{ name: 'base-clean-35', pid: DEAD_PID, startedAt: Date.now() }];
+  });
+  const rr = fakeRunner(cfg).onSpawn(5001);
+  assert.equal((await getDevice(rr, cfg, { flavor: 'clean', project: '/p', owner: cli() })).serial, 'emulator-5620');
 });

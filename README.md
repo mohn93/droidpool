@@ -40,7 +40,7 @@ Building takes a few minutes (system image install if missing, first boot, snaps
 
 ```
 droidpool get [--clean|--signed-in] [--api N] [--project P]   # prints the serial
-droidpool release <serial>
+droidpool release <serial> [--force]   # --force: also release a device a live MCP session holds
 droidpool renew <serial>      # extend a CLI lease
 droidpool show <serial>       # open a scrcpy mirror window on the device
 droidpool ls
@@ -53,8 +53,8 @@ CLI leases expire after 2 hours unless renewed. Devices taken through the MCP se
 ## MCP tools
 
 - `get_device`: `flavor` (clean | signed-in), `api`, `project` (absolute path), `reuse_serial`. Returns `{ serial, deviceId, flavor, api }`. Waits up to 90 s if the pool is full (max 3 devices), then fails.
-- `release_device`: `serial`.
-- `show_device`: `serial`. Opens a scrcpy mirror window so the user can watch or interact.
+- `release_device`: `serial`. Only for your own devices, or ones whose session is gone.
+- `show_device`: `serial`. Opens a scrcpy mirror window so the user can watch or interact. Same ownership rule as release.
 - `list_devices`.
 
 Devices have no window of their own. `show` mirrors one with scrcpy v5.0.1, which droidpool downloads once from the official GitHub release into `~/.droidpool/tools` and checks against its pinned SHA-256 (Homebrew is not used). It talks to the SDK's adb, so it does not start a second adb server. The window closes when the device is released.
@@ -72,7 +72,7 @@ Launch flags are owned by droidpool (`-avd <id> -port <p> -no-snapshot-save -no-
 - The 3.5 GB `ram.bin` stays shared and is never rewritten.
 - Clone resume took 6.5 to 10.8 s (host load 14 to 17), against about 5 s for the original.
 
-Free space inside a guest is not returned to the host (`fstrim` needs root on google_apis), which is fine because devices are short-lived. If cloning fails, droidpool aborts; it never falls back to a full copy. `get` also checks free disk first (1.2 x the 6 GiB data partition, plus 2 GiB margin), since the emulator refuses to start without that room.
+Free space inside a guest is not returned to the host (`fstrim` needs root on google_apis), which is fine because devices are short-lived. If cloning fails, droidpool aborts; it never falls back to a full copy. `get` also checks free disk first: 1.2 x the 6 GiB data partition for the new device and for each device already running (any clone may grow that far), plus 2 GiB margin. `base build` refuses while devices are cloned from that base, and `get` refuses a base while it is being rebuilt.
 
 ## Smoke test
 
@@ -80,7 +80,7 @@ Free space inside a guest is not returned to the host (`fstrim` needs root on go
 DROIDPOOL_E2E=1 node scripts/e2e.ts
 ```
 
-Uses a temp `DROIDPOOL_HOME`, builds a clean base, gets two devices, checks both boot and load the snapshot, writes 200 MB in one, releases both, and prints boot seconds and freed MB. Needs about 15 GB free and ports 5620-5700 unused. It also asserts that `~/.android/avd` is unchanged and that no emulator process from the run outlives its release. Without `DROIDPOOL_E2E=1` it exits 0 immediately.
+Uses a temp `DROIDPOOL_HOME`, builds a clean base, gets two devices, checks both boot and load the snapshot, writes 200 MB in one, releases both, and prints boot seconds and freed MB. Needs about 24 GB free. Ports held by other emulators are skipped. It also asserts that `~/.android/avd` is unchanged and that no emulator process from the run outlives its release. Without `DROIDPOOL_E2E=1` it exits 0 immediately.
 
 ### Measured
 

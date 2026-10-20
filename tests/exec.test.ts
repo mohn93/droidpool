@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { realRunner } from '../src/exec.ts';
+import { procAlive, realRunner } from '../src/exec.ts';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -46,4 +46,14 @@ test('realRunner.run times out with grandchild', async () => {
     // pgrep exits 1 when nothing matches
   }
   assert.equal(found.trim(), '');
+});
+
+test('realRunner.startTime identifies a live process and is stable', () => {
+  const a = realRunner.startTime(process.pid);
+  assert.ok(a && a.length > 0);
+  assert.equal(realRunner.startTime(process.pid), a);
+  assert.equal(realRunner.startTime(999_999), undefined);
+  assert.equal(procAlive(realRunner, process.pid, a), true);
+  assert.equal(procAlive(realRunner, process.pid, 'some other start'), false);
+  assert.equal(procAlive(realRunner, 0), false);
 });

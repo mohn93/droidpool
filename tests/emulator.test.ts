@@ -121,7 +121,7 @@ test('killDevice escalates', async () => {
   const f = new FakeRunner();
   f.alive.add(9);
   await killDevice(f, { ...cfg, killWaitMs: 50 }, 'emulator-5620', 9);
-  assert.deepEqual(f.killed, [{ pid: 9, signal: 'SIGKILL' }]);
+  assert.deepEqual(f.killed, [{ pid: 9, signal: 'SIGKILL', group: true }]);
 });
 
 test('setAnimationsOff sets three global scales to 0', async () => {

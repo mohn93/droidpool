@@ -6,8 +6,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { ensureDirs, loadConfig, type Config } from './config.ts';
-import { realRunner, type Runner } from './exec.ts';
-import { getDevice, listDevices, reap, releaseDevice } from './pool.ts';
+import { killRunChildren, realRunner, type Runner } from './exec.ts';
+import { abortCurrentGets, getDevice, listDevices, reap, releaseDevice } from './pool.ts';
 import { withState } from './state.ts';
 import { showDevice } from './viewer.ts';
 
@@ -30,6 +30,7 @@ async function toResult(fn: () => Promise<string> | string): Promise<ToolResult>
 
 export function createServer(deps: McpDeps): McpServer {
   const { runner, cfg, pid } = deps;
+  const start = runner.startTime(pid);
   const server = new McpServer({ name: 'droidpool', version: '0.1.0' });
 
   server.registerTool(
@@ -53,7 +54,7 @@ export function createServer(deps: McpDeps): McpServer {
           flavor: args.flavor ?? 'clean',
           api: args.api,
           project: args.project,
-          owner: { kind: 'mcp', pid },
+          owner: { kind: 'mcp', pid, ...(start !== undefined && { start }) },
           reuseSerial: args.reuse_serial,
         });
         return JSON.stringify({ serial: d.serial, deviceId: d.deviceId, flavor: d.flavor, api: d.api });
@@ -66,7 +67,12 @@ export function createServer(deps: McpDeps): McpServer {
       description: 'Release a device you got from get_device.',
       inputSchema: { serial: z.string().describe('serial returned by get_device') },
     },
-    (args) => toResult(async () => (await releaseDevice(runner, cfg, args.serial, { requireOwnerPid: pid })).message),
+    (args) =>
+      toResult(async () => {
+        const r = await releaseDevice(runner, cfg, args.serial, { requireOwnerPid: pid });
+        if (!r.released) throw new Error(r.message);
+        return r.message;
+      }),
   );
 
   server.registerTool(
@@ -76,7 +82,7 @@ export function createServer(deps: McpDeps): McpServer {
         'Open a window on the user\'s screen mirroring a device (scrcpy), so the user can watch or interact, for example to log in by hand. Devices are headless otherwise. The window closes when the device is released.',
       inputSchema: { serial: z.string().describe('serial returned by get_device') },
     },
-    (args) => toResult(() => showDevice(runner, cfg, args.serial)),
+    (args) => toResult(() => showDevice(runner, cfg, args.serial, { requireOwnerPid: pid })),
   );
 
   server.registerTool(
@@ -119,8 +125,17 @@ const shq = (v: string) => `'${v.replaceAll("'", `'\\''`)}'`;
 export function scheduleReaper(runner: Runner, cfg: Config): void {
   const sleepS = Math.ceil(cfg.ownerGraceMs / 1000) + 5;
   const script = `sleep ${sleepS}; exec ${shq(process.execPath)} --disable-warning=ExperimentalWarning ${shq(CLI_PATH)} gc`;
-  runner.spawnDetached('sh', ['-c', script], { env: process.env, logFile: path.join(cfg.logsDir, 'reaper.log') });
+  const logFile = path.join(cfg.logsDir, 'reaper.log');
+  // Appended to on every exit; start over once it gets large.
+  try {
+    if (fs.statSync(logFile).size > REAPER_LOG_MAX) fs.truncateSync(logFile, 0);
+  } catch {
+    // no log yet
+  }
+  runner.spawnDetached('sh', ['-c', script], { env: process.env, logFile });
 }
+
+const REAPER_LOG_MAX = 1024 * 1024;
 
 const REAP_INTERVAL_MS = 30_000;
 
@@ -142,6 +157,10 @@ async function main(): Promise<void> {
     if (closing) return;
     closing = true;
     clearInterval(timer);
+    // A get_device still booting would leave its emulator behind; its booting lease is reaped
+    // once the reaper sees this process is gone.
+    killRunChildren();
+    abortCurrentGets(realRunner, cfg);
     markGone(deps)
       .then((n) => {
         if (n > 0) scheduleReaper(realRunner, cfg);

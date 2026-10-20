@@ -29,7 +29,7 @@ function lease(port: number): Lease {
 
 test('empty when missing', () => {
   const dir = tmpDir();
-  assert.deepEqual(readState(path.join(dir, 'state.json')), { bases: [], leases: [] });
+  assert.deepEqual(readState(path.join(dir, 'state.json')), { bases: [], leases: [], builds: [] });
 });
 
 test('withState persists mutation', async () => {

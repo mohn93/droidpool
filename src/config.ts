@@ -9,6 +9,8 @@ export interface Config {
   logsDir: string;
   stateFile: string;
   sdkRoot: string;
+  /** Where the emulator keeps per-user files (adbkey, modem-nv-ram-<port>); droidpool only cleans up after itself there. */
+  emulatorHome: string;
   emulatorBin: string;
   adbBin: string;
   sdkmanagerBin: string;
@@ -43,6 +45,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     logsDir: path.join(home, 'logs'),
     stateFile: path.join(home, 'state.json'),
     sdkRoot,
+    emulatorHome: env.ANDROID_EMULATOR_HOME ?? env.ANDROID_USER_HOME ?? path.join(userHome, '.android'),
     emulatorBin: path.join(sdkRoot, 'emulator', 'emulator'),
     adbBin: path.join(sdkRoot, 'platform-tools', 'adb'),
     sdkmanagerBin: path.join(sdkRoot, 'cmdline-tools', 'latest', 'bin', 'sdkmanager'),
