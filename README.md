@@ -288,7 +288,8 @@ droidpool never reads or writes `~/.android/avd`; your own AVDs are untouched.
 | `sdkmanager failed: ... ENOENT` | cmdline-tools missing, or not at `cmdline-tools/latest` | Install them at that path (Quickstart step 1), or point `ANDROID_HOME` at the SDK that has them |
 | `sdkmanager failed: ...` mentioning Java | No JDK on PATH | Install Java 17 or newer; check with `java -version` |
 | `sdkmanager failed: ...` mentioning licenses | SDK licenses not accepted | Run `sdkmanager --licenses`, then build again |
-| `could not parse emulator version from: ` | `$ANDROID_HOME/emulator/emulator` is missing | `sdkmanager "emulator"` |
+| `emulator not found at ... Install it: sdkmanager "emulator"` | `$ANDROID_HOME/emulator/emulator` is missing | Run the command in the message, or point `ANDROID_HOME` at the right SDK |
+| `could not read emulator version (exit N): ...` | The emulator binary runs but fails | Read the output in the message; reinstall with `sdkmanager "emulator"` |
 | `no base for clean API 35. Build one: ...` | No base yet | Run the command in the message |
 | `base ... was built on emulator A; emulator is now B. Rebuild: ...` | The SDK emulator was updated, which invalidates snapshots | Run the rebuild command in the message |
 | `base ... has no snapshot on disk. Rebuild: ...` | An interrupted build or deleted files | Run the rebuild command in the message |

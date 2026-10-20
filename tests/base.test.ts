@@ -188,6 +188,7 @@ test('buildBase signed-in waits for user', async () => {
     waitForUser: async (p: string) => {
       order.push('wait');
       assert.ok(p.includes('Sign in to Google and Play'));
+      assert.ok(p.includes('press Enter'));
     },
   };
   r.onRun(

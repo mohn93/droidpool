@@ -12,8 +12,12 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 export async function emulatorVersion(runner: Runner, cfg: Config): Promise<string> {
   const r = await runner.run(cfg.emulatorBin, ['-version'], { env: envFor(cfg), timeoutMs: 30_000 });
   const m = /Android emulator version (\d+\.\d+\.\d+)/.exec(r.stdout + r.stderr);
-  if (!m) throw new Error(`could not parse emulator version from: ${r.stdout.slice(0, 200)}`);
-  return m[1]!;
+  if (m) return m[1]!;
+  if (r.code === 127) {
+    throw new Error(`emulator not found at ${cfg.emulatorBin}. Install it: sdkmanager "emulator"`);
+  }
+  const output = (r.stdout + r.stderr).trim().slice(0, 200) || 'no output';
+  throw new Error(`could not read emulator version (exit ${r.code}): ${output}`);
 }
 
 export function launchDevice(

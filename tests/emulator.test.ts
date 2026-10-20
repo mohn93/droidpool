@@ -32,7 +32,25 @@ test('emulatorVersion parses', async () => {
 test('emulatorVersion throws on unparseable output', async () => {
   const f = new FakeRunner();
   f.onRun(() => true, { code: 0, stdout: 'garbage', stderr: '' });
-  await assert.rejects(emulatorVersion(f, cfg), /version/);
+  await assert.rejects(emulatorVersion(f, cfg), {
+    message: 'could not read emulator version (exit 0): garbage',
+  });
+});
+
+test('emulatorVersion names the missing binary and the fix', async () => {
+  const f = new FakeRunner();
+  f.onRun(() => true, { code: 127, stdout: '', stderr: 'spawn ENOENT' });
+  await assert.rejects(emulatorVersion(f, cfg), {
+    message: `emulator not found at ${cfg.emulatorBin}. Install it: sdkmanager "emulator"`,
+  });
+});
+
+test('emulatorVersion includes stderr when the emulator fails', async () => {
+  const f = new FakeRunner();
+  f.onRun(() => true, { code: 1, stdout: '', stderr: 'dyld: Library not loaded' });
+  await assert.rejects(emulatorVersion(f, cfg), {
+    message: 'could not read emulator version (exit 1): dyld: Library not loaded',
+  });
 });
 
 test('launchDevice uses exact flags and AVD home', () => {

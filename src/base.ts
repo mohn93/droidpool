@@ -162,7 +162,7 @@ export async function buildBase(
     await setAnimationsOff(runner, cfg, serial);
     if (flavor === 'signed-in') {
       await io.waitForUser(
-        'Sign in to Google and Play in the emulator window, finish any setup prompts, then continue.',
+        'Sign in to Google and Play in the emulator window and finish any setup prompts, then press Enter here to continue.',
       );
     }
     io.log('saving snapshot');
